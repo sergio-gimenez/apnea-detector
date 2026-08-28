@@ -122,7 +122,14 @@ private fun RecorderApp() {
 
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(receiverContext: Context?, intent: Intent?) = refresh()
+            override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                val wasStopping = message.startsWith("Stopping")
+                refresh()
+                if (wasStopping && activeId == null) {
+                    val latest = sessions.firstOrNull()
+                    message = latest?.error ?: "Capture stopped and saved."
+                }
+            }
         }
         ContextCompat.registerReceiver(
             context,

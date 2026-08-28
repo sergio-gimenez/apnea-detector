@@ -20,17 +20,15 @@ install -d -o apnea-detector -g apnea-detector -m 0750 /var/lib/apnea-detector
 install -d -o root -g root -m 0755 /opt/apnea-detector/releases
 
 RELEASE_NAME=$(date +%Y%m%d%H%M%S)-$$
-STAGING=/opt/apnea-detector/releases/.staging-$RELEASE_NAME
 RELEASE=/opt/apnea-detector/releases/$RELEASE_NAME
-trap 'rm -rf "$STAGING"' EXIT
-install -d -o root -g root -m 0755 "$STAGING/backend"
-install -o root -g root -m 0644 "$SOURCE_DIR/backend/pyproject.toml" "$STAGING/backend/pyproject.toml"
-cp -a "$SOURCE_DIR/backend/apnea_api" "$STAGING/backend/apnea_api"
-rm -rf "$STAGING/backend/apnea_api/__pycache__"
+trap 'rm -rf "$RELEASE"' EXIT
+install -d -o root -g root -m 0755 "$RELEASE/backend"
+install -o root -g root -m 0644 "$SOURCE_DIR/backend/pyproject.toml" "$RELEASE/backend/pyproject.toml"
+cp -a "$SOURCE_DIR/backend/apnea_api" "$RELEASE/backend/apnea_api"
+rm -rf "$RELEASE/backend/apnea_api/__pycache__"
 
-python3 -m venv "$STAGING/venv"
-"$STAGING/venv/bin/pip" install --no-cache-dir "$STAGING/backend"
-mv "$STAGING" "$RELEASE"
+python3 -m venv "$RELEASE/venv"
+"$RELEASE/venv/bin/pip" install --no-cache-dir "$RELEASE/backend"
 trap - EXIT
 
 ln -s "releases/$RELEASE_NAME" "/opt/apnea-detector/.current-$RELEASE_NAME"

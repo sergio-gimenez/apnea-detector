@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nocturne Review</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="pulse"></span> NOCTURNE / REVIEW</div>
+      <div class="status">RESEARCH PROTOTYPE · NOT DIAGNOSTIC</div>
+    </header>
+    <main>
+      <section id="session-list" class="panel">
+        <p class="eyebrow">OVERNIGHT CAPTURES</p>
+        <h1>Respiratory evidence,<br><em>aligned in time.</em></h1>
+        <p class="lede">Phone audio and wearable physiology, reduced to reviewable candidates. Raw evidence remains primary.</p>
+        <div id="sessions" class="sessions"></div>
+      </section>
+
+      <section id="review" class="hidden">
+        <button id="back" class="text-button">← All captures</button>
+        <div class="review-head">
+          <div>
+            <p class="eyebrow" id="session-date"></p>
+            <h1>Night review</h1>
+          </div>
+          <div class="actions">
+            <button id="garmin">Pull Garmin</button>
+            <button id="reanalyze">Run analysis</button>
+          </div>
+        </div>
+        <div id="notice"></div>
+        <div id="metrics" class="metrics"></div>
+        <section class="panel timeline-panel">
+          <div class="timeline-title">
+            <div><p class="eyebrow">SYNCHRONIZED SIGNALS</p><h2>Whole-night timeline</h2></div>
+            <div class="legend"><span class="audio">Audio energy</span><span class="spo2">SpO₂</span><span class="hr">Heart rate</span></div>
+          </div>
+          <canvas id="timeline" height="330"></canvas>
+          <p class="hint">Event bars mark deterministic low-audio candidates. Click event below for evidence and audio.</p>
+        </section>
+        <section class="review-grid">
+          <div class="panel">
+            <p class="eyebrow">CANDIDATE QUEUE</p>
+            <div id="events"></div>
+          </div>
+          <aside class="panel evidence-panel" id="evidence">
+            <p class="eyebrow">EVIDENCE</p>
+            <p class="muted">Select a suspected respiratory event.</p>
+          </aside>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

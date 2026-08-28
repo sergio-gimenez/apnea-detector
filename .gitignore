@@ -1,0 +1,15 @@
+.gradle/
+.idea/
+*.iml
+**/build/
+local.properties
+.venv/
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+*.egg-info/
+data/
+backend/data/
+android/.kotlin/
+android/captures/

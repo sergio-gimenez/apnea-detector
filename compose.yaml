@@ -1,0 +1,20 @@
+services:
+  api:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      APNEA_DATA_DIR: /data
+      APNEA_API_TOKEN: ${APNEA_API_TOKEN:?Set APNEA_API_TOKEN in .env}
+    volumes:
+      - apnea-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  apnea-data:
+    name: apnea-detector-data

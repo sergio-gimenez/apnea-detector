@@ -1,0 +1,24 @@
+[Unit]
+Description=Nocturne sleep screening prototype
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apnea-detector
+Group=apnea-detector
+WorkingDirectory=/opt/apnea-detector/current/backend
+Environment=APNEA_DATA_DIR=/var/lib/apnea-detector
+Environment=GARMIN_TOKEN_STORE=/var/lib/apnea-detector/garmin
+EnvironmentFile=/etc/apnea-detector.env
+ExecStart=/opt/apnea-detector/current/venv/bin/uvicorn apnea_api.main:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apnea-detector
+
+[Install]
+WantedBy=multi-user.target

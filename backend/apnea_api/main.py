@@ -43,6 +43,7 @@ def _session_json(row: SleepSession) -> dict:
         "started_at_monotonic_ns": row.started_at_monotonic_ns,
         "sample_rate": row.sample_rate,
         "total_samples": row.total_samples,
+        "chunk_count": len(row.chunks),
         "recorded_seconds": row.total_samples / row.sample_rate if row.sample_rate else 0,
         "duration_seconds": duration,
         "created_at": _as_utc(row.created_at).isoformat(),

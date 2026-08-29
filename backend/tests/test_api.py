@@ -122,3 +122,35 @@ def test_summary_reports_odi_from_stored_spo2(tmp_path):
     assert summary["odi3"] == oximetry["odi3"]
     assert summary["minimum_spo2"] == 91.0
     assert summary["spo2_coverage_hours"] > 0.1
+
+
+def test_session_json_reports_chunk_count(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'chunks.db'}"))
+    session_id = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+    client.post(
+        "/api/sessions",
+        json={
+            "id": session_id,
+            "device_id": "test phone",
+            "started_at_utc": started.isoformat(),
+            "started_at_monotonic_ns": 0,
+            "sample_rate": 16_000,
+        },
+    )
+    assert client.get(f"/api/sessions/{session_id}").json()["chunk_count"] == 0
+    for sequence in range(2):
+        client.post(
+            f"/api/sessions/{session_id}/audio-chunks",
+            data={
+                "sequence": str(sequence),
+                "sample_offset": str(16_000 * 60 * sequence),
+                "sample_count": str(16_000 * 60),
+                "started_at_utc": (started + timedelta(seconds=60 * sequence)).isoformat(),
+                "started_at_monotonic_ns": str(sequence * 60_000_000_000),
+            },
+            files={"file": (f"audio_{sequence:05d}.wav", wav_bytes(16_000 * 60), "audio/wav")},
+        )
+    remote = client.get(f"/api/sessions/{session_id}").json()
+    assert remote["chunk_count"] == 2
+    assert remote["total_samples"] == 16_000 * 120

@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +62,7 @@ import androidx.work.workDataOf
 import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,10 +90,47 @@ private fun RecorderApp() {
     var pendingStart by remember { mutableStateOf(false) }
     var deletePrompt by remember { mutableStateOf<SessionManifest?>(null) }
     var clockTick by remember { mutableStateOf(Instant.now().epochSecond) }
+    val scope = rememberCoroutineScope()
 
     fun refresh() {
         activeId = store.activeSessionId
         sessions = store.listSessions()
+    }
+
+    /**
+     * Opens the deletion prompt, first confirming with the backend that it holds every
+     * chunk for captures this build did not upload itself.
+     */
+    fun requestDelete(session: SessionManifest) {
+        if (session.status == "uploaded") {
+            deletePrompt = session
+            return
+        }
+        scope.launch {
+            message = "Checking the backend copy…"
+            runCatching {
+                require(backendUrl.isNotBlank()) { "Set backend URL" }
+                store.backendUrl = backendUrl
+                store.apiToken = token
+                BackendClient(backendUrl, token, store).uploadedChunkCount(session.id)
+            }.onSuccess { remote ->
+                when {
+                    remote == null ->
+                        message = "The backend has no copy of this capture. Upload it before deleting."
+                    remote < session.chunks.size ->
+                        message = "The backend holds $remote of ${session.chunks.size} chunks. " +
+                            "Upload again before deleting."
+                    else -> {
+                        store.markUploaded(session.id)
+                        refresh()
+                        deletePrompt = store.load(session.id)
+                        message = "Backend copy confirmed: $remote chunks."
+                    }
+                }
+            }.onFailure { error ->
+                message = error.message ?: "Could not verify the backend copy"
+            }
+        }
     }
 
     fun startRecording() {
@@ -226,7 +265,7 @@ private fun RecorderApp() {
                     SessionRow(
                         session = session,
                         localBytes = if (session.audioDeleted) 0L else store.audioBytes(session.id),
-                        onDelete = { deletePrompt = session },
+                        onDelete = { requestDelete(session) },
                         onUpload = {
                         store.backendUrl = backendUrl
                         store.apiToken = token
@@ -296,7 +335,7 @@ private fun DeleteAudioDialog(
         text = {
             Text(
                 "The ${session.chunks.size} chunks of ${session.startedAtUtc.take(16).replace('T', ' ')} " +
-                    "(${formatBytes(bytes)}) are on the backend. Deleting them here frees space on the phone " +
+                    "(${formatBytes(bytes)}) are confirmed on the backend. Deleting them here frees space on the phone " +
                     "and cannot be undone. Recording metadata stays.",
                 color = Muted,
                 fontSize = 13.sp,
@@ -403,10 +442,15 @@ private fun SessionRow(
             )
             session.error?.let { Text(it, color = Amber, fontSize = 11.sp) }
         }
-        if (session.status == "uploaded" && !session.audioDeleted) {
-            Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("DELETE") }
-        } else if (session.status != "recording" && !session.audioDeleted) {
-            Button(onClick = onUpload, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("UPLOAD") }
+        if (session.status != "recording" && !session.audioDeleted) {
+            if (session.status != "uploaded") {
+                Button(onClick = onUpload, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("UPLOAD") }
+                Spacer(Modifier.width(8.dp))
+            }
+            Button(
+                onClick = onDelete,
+                colors = ButtonDefaults.buttonColors(containerColor = Line, contentColor = Amber),
+            ) { Text("DELETE") }
         }
     }
 }

@@ -6,6 +6,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -63,6 +65,30 @@ class BackendClient(
         progress("Running initial analysis")
         postJson("/api/sessions/$sessionId/complete", "")
         session.chunks.size
+    }
+
+    /**
+     * Confirms the backend already holds every chunk of a session, so its local audio
+     * can be deleted. Returns how many chunks the backend reports, or null when the
+     * session is unknown to it.
+     */
+    suspend fun uploadedChunkCount(sessionId: String): Int? = withContext(Dispatchers.IO) {
+        require(baseUrl.startsWith("https://")) { "Backend URL must use HTTPS" }
+        val builder = Request.Builder().url("$baseUrl/api/sessions/$sessionId").get()
+        if (token.isNotBlank()) builder.header("Authorization", "Bearer $token")
+        client.newCall(builder.build()).execute().use { response ->
+            val payload = response.body.string()
+            when {
+                response.code == 404 -> null
+                !response.isSuccessful -> throw IOException("Backend ${response.code}: ${payload.take(300)}")
+                else -> json.parseToJsonElement(payload)
+                    .jsonObject["chunk_count"]
+                    ?.jsonPrimitive
+                    ?.content
+                    ?.toIntOrNull()
+                    ?: throw IOException("Backend did not report chunk_count; update the backend")
+            }
+        }
     }
 
     private fun postJson(path: String, body: String) {

@@ -31,6 +31,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,7 +40,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,9 +50,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import java.time.Duration
 import java.time.Instant
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -73,7 +78,6 @@ private val Muted = Color(0xFF8B979F)
 private fun RecorderApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val store = remember { SessionStore(context) }
-    val scope = rememberCoroutineScope()
     var sessions by remember { mutableStateOf(store.listSessions()) }
     var activeId by remember { mutableStateOf(store.activeSessionId) }
     var backendUrl by remember { mutableStateOf(store.backendUrl) }
@@ -123,6 +127,11 @@ private fun RecorderApp() {
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                if (intent?.action == UploadWorker.ACTION_STATE) {
+                    message = intent.getStringExtra(UploadWorker.EXTRA_MESSAGE) ?: "Upload state changed."
+                    refresh()
+                    return
+                }
                 val wasStopping = message.startsWith("Stopping")
                 refresh()
                 if (wasStopping && activeId == null) {
@@ -134,7 +143,10 @@ private fun RecorderApp() {
         ContextCompat.registerReceiver(
             context,
             receiver,
-            IntentFilter(RecordingService.ACTION_STATE),
+            IntentFilter().apply {
+                addAction(RecordingService.ACTION_STATE)
+                addAction(UploadWorker.ACTION_STATE)
+            },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         onDispose { context.unregisterReceiver(receiver) }
@@ -207,14 +219,28 @@ private fun RecorderApp() {
                     SessionRow(session) {
                         store.backendUrl = backendUrl
                         store.apiToken = token
-                        scope.launch {
-                            runCatching {
-                                require(session.status != "recording") { "Stop capture before upload" }
-                                require(backendUrl.isNotBlank()) { "Set backend URL" }
-                                BackendClient(backendUrl.trimEnd('/'), token, store).upload(session.id) { progress -> message = progress }
-                            }.onSuccess { chunks -> message = "$chunks chunks uploaded and analyzed." }
-                                .onFailure { error -> message = error.message ?: "Upload failed" }
-                            refresh()
+                        runCatching {
+                            require(session.status != "recording") { "Stop capture before upload" }
+                            require(backendUrl.isNotBlank()) { "Set backend URL" }
+                            store.backendUrl = backendUrl
+                            store.apiToken = token
+                            val request = OneTimeWorkRequestBuilder<UploadWorker>()
+                                .setInputData(workDataOf(UploadWorker.KEY_SESSION_ID to session.id))
+                                .setConstraints(
+                                    Constraints.Builder()
+                                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                                        .build(),
+                                )
+                                .build()
+                            WorkManager.getInstance(context).enqueueUniqueWork(
+                                "upload-${session.id}",
+                                ExistingWorkPolicy.KEEP,
+                                request,
+                            )
+                        }.onSuccess {
+                            message = "Upload queued. You may lock the screen."
+                        }.onFailure { error ->
+                            message = error.message ?: "Could not queue upload"
                         }
                     }
                 }
@@ -269,6 +295,7 @@ private fun ConfigCard(
             label = { Text("Backend URL") },
             placeholder = { Text("https://sleep.sergiogimenez.com") },
             singleLine = true,
+            colors = uploadFieldColors(),
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
         )
         OutlinedTextField(
@@ -277,10 +304,25 @@ private fun ConfigCard(
             label = { Text("Prototype API token") },
             visualTransformation = PasswordVisualTransformation(),
             singleLine = true,
+            colors = uploadFieldColors(),
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
         )
     }
 }
+
+@Composable
+private fun uploadFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    disabledTextColor = Muted,
+    cursorColor = Cyan,
+    focusedLabelColor = Cyan,
+    unfocusedLabelColor = Muted,
+    focusedPlaceholderColor = Muted,
+    unfocusedPlaceholderColor = Muted,
+    focusedBorderColor = Cyan,
+    unfocusedBorderColor = Line,
+)
 
 @Composable
 private fun SessionRow(session: SessionManifest, onUpload: () -> Unit) {

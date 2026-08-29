@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=2">
+    <link rel="stylesheet" href="/styles.css?v=3">
   </head>
   <body>
     <header>
@@ -36,10 +36,10 @@
         <section class="panel timeline-panel">
           <div class="timeline-title">
             <div><p class="eyebrow">SYNCHRONIZED SIGNALS</p><h2>Whole-night timeline</h2></div>
-            <div class="legend"><span class="audio">Audio energy</span><span class="spo2">SpO₂</span><span class="hr">Heart rate</span><span class="resp">Respiration (brpm)</span><span class="candidate">Audio candidate</span></div>
+            <div class="legend"><span class="audio">Audio energy</span><span class="spo2">SpO₂</span><span class="hr">Heart rate</span><span class="resp">Respiration (brpm)</span><span class="candidate">Audio candidate</span><span class="desat">SpO₂ desaturation ≥3%</span></div>
           </div>
           <canvas id="timeline" height="330"></canvas>
-          <p class="hint">Event bars mark deterministic low-audio candidates. Click event below for evidence and audio.</p>
+          <p class="hint">Purple bars mark low-audio candidates; amber bands mark wearable SpO₂ desaturations (minute-level, supporting evidence only). Click event below for evidence and audio.</p>
         </section>
         <section class="review-grid">
           <div class="panel">
@@ -53,6 +53,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=2"></script>
+    <script src="/app.js?v=3"></script>
   </body>
 </html>

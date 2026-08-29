@@ -24,6 +24,7 @@ from .analysis import (
     session_elapsed_seconds,
 )
 from .garmin import import_for_session
+from .oximetry import OximetryResult, analyze_oximetry
 from .models import AudioChunk, Base, RespiratoryEvent, SignalPoint, SleepSession, utc_now
 from .schemas import GarminImportRequest, ReviewUpdate, SessionCreate, SignalBatch
 
@@ -391,6 +392,29 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             headers={"Cache-Control": "no-store"},
         )
 
+    def session_oximetry(session: SleepSession, db: Session) -> OximetryResult:
+        started_at = _as_utc(session.started_at_utc)
+        rows = db.scalars(
+            select(SignalPoint)
+            .where(
+                SignalPoint.session_id == session.id,
+                SignalPoint.signal_type == "spo2",
+                SignalPoint.timestamp_utc >= started_at,
+                SignalPoint.timestamp_utc
+                <= started_at
+                + timedelta(seconds=session_elapsed_seconds(session, session.chunks)),
+            )
+            .order_by(SignalPoint.timestamp_utc)
+        )
+        return analyze_oximetry(
+            [((_as_utc(row.timestamp_utc) - started_at).total_seconds(), row.value) for row in rows]
+        )
+
+    @app.get("/api/sessions/{session_id}/oximetry")
+    def get_oximetry(session_id: str, db: Session = Depends(get_db)) -> dict:
+        session = get_session_or_404(session_id, db)
+        return session_oximetry(session, db).as_json()
+
     @app.get("/api/sessions/{session_id}/summary")
     def summary(session_id: str, db: Session = Depends(get_db)) -> dict:
         session = get_session_or_404(session_id, db)
@@ -399,30 +423,27 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
                 select(RespiratoryEvent).where(RespiratoryEvent.session_id == session_id)
             )
         )
-        spo2 = list(
-            db.scalars(
-                select(SignalPoint).where(
-                    SignalPoint.session_id == session_id,
-                    SignalPoint.signal_type == "spo2",
-                    SignalPoint.timestamp_utc >= _as_utc(session.started_at_utc),
-                    SignalPoint.timestamp_utc
-                    <= _as_utc(session.started_at_utc)
-                    + timedelta(
-                        seconds=session_elapsed_seconds(session, session.chunks)
-                    ),
-                )
-            )
-        )
+        oximetry = session_oximetry(session, db).as_json()
         hours = session.total_samples / session.sample_rate / 3600 if session.sample_rate else 0
-        values = [point.value for point in spo2]
+        correlated = sum(
+            1
+            for event in events
+            if (json.loads(event.evidence_json).get("spo2_drop") or 0) >= 3.0
+        )
         return {
             "hours_analyzed": round(hours, 3),
             "suspected_events": len(events),
             "srei": round(len(events) / hours, 2) if hours else None,
             "events_over_20s": sum(event.duration_seconds >= 20 for event in events),
             "events_over_30s": sum(event.duration_seconds >= 30 for event in events),
-            "minimum_spo2": min(values) if values else None,
-            "mean_spo2": round(sum(values) / len(values), 2) if values else None,
+            "correlated_events": correlated,
+            "minimum_spo2": oximetry["minimum_spo2"],
+            "mean_spo2": oximetry["mean_spo2"],
+            "odi3": oximetry["odi3"],
+            "odi4": oximetry["odi4"],
+            "t90_seconds": oximetry["t90_seconds"],
+            "spo2_coverage_hours": oximetry["coverage_hours"],
+            "oximetry": oximetry,
             "disclaimer": "Screening metric only. SREI is not AHI and this is not a diagnosis.",
         }
 

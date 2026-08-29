@@ -11,6 +11,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .models import AudioChunk, RespiratoryEvent, SignalPoint, SleepSession
+from .oximetry import analyze_oximetry, match_desaturation
 
 ALGORITHM_VERSION = "dsp-v0.1.0"
 
@@ -194,6 +195,7 @@ def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
             )
 
     spo2 = _physiology_points(db, session, "spo2")
+    oximetry = analyze_oximetry(spo2)
     heart_rate = _physiology_points(db, session, "heart_rate")
     for candidate in candidates:
         start = candidate["start"]
@@ -201,12 +203,20 @@ def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
         evidence = candidate["evidence"]
         confidence = candidate["confidence"]
 
-        spo2_before = [value for offset, value in spo2 if start - 120 <= offset < start]
-        spo2_after = [value for offset, value in spo2 if end <= offset <= end + 180]
-        if spo2_before and spo2_after:
-            drop = float(np.median(spo2_before) - min(spo2_after))
-            evidence["spo2_drop"] = round(drop, 2)
-            confidence += 0.15 if drop >= 3.0 else 0.0
+        desaturation = match_desaturation(oximetry.desaturations_3, start, end)
+        if desaturation is not None:
+            evidence["spo2_drop"] = round(desaturation.depth, 2)
+            evidence["spo2_baseline"] = round(desaturation.baseline, 1)
+            evidence["spo2_nadir"] = round(desaturation.nadir, 1)
+            evidence["spo2_desaturation_offset"] = round(desaturation.start, 1)
+            confidence += 0.2 if desaturation.depth >= 4.0 else 0.15
+        elif oximetry.samples:
+            evidence["spo2_drop"] = 0.0
+            evidence["spo2_baseline"] = (
+                round(oximetry.baseline_spo2, 1) if oximetry.baseline_spo2 is not None else None
+            )
+            evidence["spo2_nadir"] = None
+            evidence["spo2_desaturation_offset"] = None
         else:
             evidence["spo2_drop"] = None
 

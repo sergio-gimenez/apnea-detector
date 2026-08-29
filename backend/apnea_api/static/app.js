@@ -41,12 +41,17 @@ async function openSession(id) {
   $('#session-list').classList.add('hidden');
   $('#review').classList.remove('hidden');
   $('#session-date').textContent = `${new Date(currentSession.started_at_utc).toLocaleString()} / ${currentSession.id.slice(0,8)}`;
+  const oximetry = summary.oximetry || {};
   $('#metrics').innerHTML = [
     ['SREI', summary.srei ?? '—'], ['Candidates', summary.suspected_events], ['Analyzed', duration(currentSession.duration_seconds)],
-    ['Min SpO₂', summary.minimum_spo2 == null ? '—' : `${summary.minimum_spo2}%`], ['Mean SpO₂', summary.mean_spo2 == null ? '—' : `${summary.mean_spo2}%`]
+    ['With desat', summary.correlated_events ?? 0],
+    ['ODI3 (est.)', summary.odi3 ?? '—'], ['ODI4 (est.)', summary.odi4 ?? '—'],
+    ['T90', oximetry.t90_seconds ? duration(oximetry.t90_seconds) : '—'],
+    ['Min SpO₂', summary.minimum_spo2 == null ? '—' : `${summary.minimum_spo2}%`], ['Mean SpO₂', summary.mean_spo2 == null ? '—' : `${summary.mean_spo2}%`],
+    ['SpO₂ coverage', summary.spo2_coverage_hours ? `${summary.spo2_coverage_hours.toFixed(1)}h` : '—']
   ].map(([label,value]) => `<div class="metric"><b>${value}</b><span>${label}</span></div>`).join('');
   renderEvents();
-  drawTimeline(signals, currentEvents);
+  drawTimeline(signals, currentEvents, oximetry.events || []);
 }
 
 function renderEvents() {
@@ -80,7 +85,7 @@ async function selectEvent(id) {
   if (audioResponse.ok) $('#event-audio').src = URL.createObjectURL(await audioResponse.blob());
 }
 
-function drawTimeline(signals, events) {
+function drawTimeline(signals, events, desaturations = []) {
   const canvas = $('#timeline');
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth, height = canvas.clientHeight;
@@ -92,6 +97,7 @@ function drawTimeline(signals, events) {
   const groups = {audio_energy:[], spo2:[], heart_rate:[], respiration_rate:[]};
   signals.forEach(point => { if (groups[point.signal_type]) groups[point.signal_type].push([(new Date(point.timestamp_utc).getTime()-start)/1000, point.value]); });
   for (let i=0;i<=8;i++) { const x=45+(width-65)*i/8; ctx.strokeStyle='#1f2930';ctx.beginPath();ctx.moveTo(x,20);ctx.lineTo(x,height-30);ctx.stroke();ctx.fillStyle='#65727b';ctx.fillText(duration(total*i/8),x-12,height-10); }
+  desaturations.forEach(event => { const x=45+(width-65)*event.start_offset_seconds/total; const w=Math.max(2,(width-65)*event.duration_seconds/total);ctx.fillStyle='rgba(240,173,78,.16)';ctx.fillRect(x,20,w,115); });
   events.forEach(event => { const x=45+(width-65)*event.start_offset_seconds/total; const w=Math.max(3,(width-65)*event.duration_seconds/total);ctx.fillStyle='rgba(171,128,255,.22)';ctx.fillRect(x,20,w,height-50); });
   const draw = (points,color,min,max,top,bottom) => { if (!points.length) return;ctx.strokeStyle=color;ctx.lineWidth=1.4;ctx.beginPath();points.forEach(([time,value],i)=>{const x=45+(width-65)*time/total;const y=top+(bottom-top)*(1-(value-min)/(max-min));i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke(); };
   draw(groups.audio_energy,'#58d6d0',-80,-10,28,height-38); draw(groups.spo2,'#f0ad4e',80,100,28,135); draw(groups.heart_rate,'#ff6b62',35,120,155,height-38); draw(groups.respiration_rate,'#88d498',6,30,155,height-38);

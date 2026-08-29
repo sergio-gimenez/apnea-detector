@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +35,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -84,6 +86,7 @@ private fun RecorderApp() {
     var token by remember { mutableStateOf(store.apiToken) }
     var message by remember { mutableStateOf("") }
     var pendingStart by remember { mutableStateOf(false) }
+    var deletePrompt by remember { mutableStateOf<SessionManifest?>(null) }
     var clockTick by remember { mutableStateOf(Instant.now().epochSecond) }
 
     fun refresh() {
@@ -130,6 +133,10 @@ private fun RecorderApp() {
                 if (intent?.action == UploadWorker.ACTION_STATE) {
                     message = intent.getStringExtra(UploadWorker.EXTRA_MESSAGE) ?: "Upload state changed."
                     refresh()
+                    val uploadedId = intent.getStringExtra(UploadWorker.EXTRA_SESSION_ID)
+                    if (intent.getBooleanExtra(UploadWorker.EXTRA_UPLOADED, false) && uploadedId != null) {
+                        deletePrompt = store.load(uploadedId)?.takeUnless { it.audioDeleted }
+                    }
                     return
                 }
                 val wasStopping = message.startsWith("Stopping")
@@ -216,11 +223,16 @@ private fun RecorderApp() {
                 if (message.isNotBlank()) item { Text(message, color = Cyan, fontSize = 13.sp) }
                 item { Text("CAPTURES", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.padding(top = 14.dp)) }
                 items(sessions, key = { it.id }) { session ->
-                    SessionRow(session) {
+                    SessionRow(
+                        session = session,
+                        localBytes = if (session.audioDeleted) 0L else store.audioBytes(session.id),
+                        onDelete = { deletePrompt = session },
+                        onUpload = {
                         store.backendUrl = backendUrl
                         store.apiToken = token
                         runCatching {
                             require(session.status != "recording") { "Stop capture before upload" }
+                            require(!session.audioDeleted) { "Local audio was deleted; nothing to upload" }
                             require(backendUrl.isNotBlank()) { "Set backend URL" }
                             store.backendUrl = backendUrl
                             store.apiToken = token
@@ -242,12 +254,57 @@ private fun RecorderApp() {
                         }.onFailure { error ->
                             message = error.message ?: "Could not queue upload"
                         }
-                    }
+                        },
+                    )
                 }
                 item { Spacer(Modifier.height(40.dp)) }
             }
+
+            deletePrompt?.let { candidate ->
+                DeleteAudioDialog(
+                    session = candidate,
+                    bytes = store.audioBytes(candidate.id),
+                    onDismiss = { deletePrompt = null },
+                    onConfirm = {
+                        runCatching { store.deleteAudio(candidate.id) }
+                            .onSuccess { freed ->
+                                message = "Deleted ${formatBytes(freed)} of local audio. Backend copy kept."
+                            }
+                            .onFailure { error ->
+                                message = error.message ?: "Could not delete local audio"
+                            }
+                        deletePrompt = null
+                        refresh()
+                    },
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun DeleteAudioDialog(
+    session: SessionManifest,
+    bytes: Long,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        title = { Text("Delete local audio?", color = Color.White) },
+        text = {
+            Text(
+                "The ${session.chunks.size} chunks of ${session.startedAtUtc.take(16).replace('T', ' ')} " +
+                    "(${formatBytes(bytes)}) are on the backend. Deleting them here frees space on the phone " +
+                    "and cannot be undone. Recording metadata stays.",
+                color = Muted,
+                fontSize = 13.sp,
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("DELETE", color = Amber) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("KEEP", color = Cyan) } },
+    )
 }
 
 @Composable
@@ -325,7 +382,12 @@ private fun uploadFieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-private fun SessionRow(session: SessionManifest, onUpload: () -> Unit) {
+private fun SessionRow(
+    session: SessionManifest,
+    localBytes: Long,
+    onUpload: () -> Unit,
+    onDelete: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().background(Panel).border(1.dp, Line).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -333,12 +395,26 @@ private fun SessionRow(session: SessionManifest, onUpload: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(session.startedAtUtc.take(16).replace('T', ' '), color = Color.White, fontWeight = FontWeight.Bold)
             Text("${session.chunks.size} chunks · ${formatSamples(session.totalSamples)} · ${session.status}", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            Text(
+                if (session.audioDeleted) "local audio deleted" else "${formatBytes(localBytes)} on phone",
+                color = Muted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+            )
             session.error?.let { Text(it, color = Amber, fontSize = 11.sp) }
         }
-        if (session.status != "recording") {
+        if (session.status == "uploaded" && !session.audioDeleted) {
+            Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("DELETE") }
+        } else if (session.status != "recording" && !session.audioDeleted) {
             Button(onClick = onUpload, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("UPLOAD") }
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1_000_000_000.0)
+    bytes >= 1_000_000 -> "%.0f MB".format(bytes / 1_000_000.0)
+    else -> "%.0f kB".format(bytes / 1_000.0)
 }
 
 private fun elapsed(start: String?, nowEpochSecond: Long): String {

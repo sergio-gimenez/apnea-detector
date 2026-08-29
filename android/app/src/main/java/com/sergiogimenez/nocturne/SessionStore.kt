@@ -99,6 +99,33 @@ class SessionStore(private val context: Context) {
     }
 
     @Synchronized
+    fun markUploaded(sessionId: String) {
+        val current = requireNotNull(load(sessionId))
+        save(current.copy(status = "uploaded", uploadedAtUtc = Instant.now().toString()))
+    }
+
+    /** Deletes the local WAV chunks of an already uploaded session. Metadata is kept. */
+    @Synchronized
+    fun deleteAudio(sessionId: String): Long {
+        val current = requireNotNull(load(sessionId)) { "Session metadata missing" }
+        check(current.status == "uploaded") { "Only uploaded captures can be deleted locally" }
+        check(!current.audioDeleted) { "Local audio was already deleted" }
+        var freed = 0L
+        current.chunks.forEach { chunk ->
+            val file = chunkFile(sessionId, chunk.fileName)
+            val size = file.length()
+            if (file.delete()) freed += size
+        }
+        save(current.copy(audioDeleted = true))
+        return freed
+    }
+
+    fun audioBytes(sessionId: String): Long = sessionDirectory(sessionId)
+        .listFiles { file -> file.name.endsWith(".wav") }
+        ?.sumOf { it.length() }
+        ?: 0L
+
+    @Synchronized
     fun interrupt(sessionId: String) {
         recoverPending(sessionId)
         val current = requireNotNull(load(sessionId))

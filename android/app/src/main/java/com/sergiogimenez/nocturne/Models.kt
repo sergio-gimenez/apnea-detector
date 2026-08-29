@@ -24,6 +24,8 @@ data class SessionManifest(
     val status: String = "recording",
     val totalSamples: Long = 0,
     val completedAtUtc: String? = null,
+    val uploadedAtUtc: String? = null,
+    val audioDeleted: Boolean = false,
     val error: String? = null,
     val chunks: List<AudioChunkMetadata> = emptyList(),
 )

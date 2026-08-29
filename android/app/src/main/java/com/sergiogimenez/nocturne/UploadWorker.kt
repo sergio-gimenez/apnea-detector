@@ -30,9 +30,10 @@ class UploadWorker(
             val chunks = BackendClient(backendUrl, token, store).upload(sessionId) { progress ->
                 notificationManager.notify(FOREGROUND_NOTIFICATION_ID, progressNotification(progress))
             }
+            store.markUploaded(sessionId)
             val message = "$chunks chunks uploaded and analyzed."
             notificationManager.notify(COMPLETION_NOTIFICATION_ID, resultNotification(message, false))
-            sendState(message)
+            sendState(message, sessionId, uploaded = true)
             Result.success()
         } catch (error: Throwable) {
             val message = "Upload failed: ${error.message ?: error.javaClass.simpleName}"
@@ -51,6 +52,8 @@ class UploadWorker(
         sendState(message)
         return Result.failure()
     }
+
+    private fun uploadedSessionId() = inputData.getString(KEY_SESSION_ID)
 
     private fun foregroundInfo(text: String): ForegroundInfo {
         val notification = progressNotification(text)
@@ -115,11 +118,13 @@ class UploadWorker(
         )
     }
 
-    private fun sendState(message: String) {
+    private fun sendState(message: String, sessionId: String? = null, uploaded: Boolean = false) {
         applicationContext.sendBroadcast(
             Intent(ACTION_STATE)
                 .setPackage(applicationContext.packageName)
-                .putExtra(EXTRA_MESSAGE, message),
+                .putExtra(EXTRA_MESSAGE, message)
+                .putExtra(EXTRA_SESSION_ID, sessionId ?: uploadedSessionId())
+                .putExtra(EXTRA_UPLOADED, uploaded),
         )
     }
 
@@ -130,6 +135,8 @@ class UploadWorker(
         const val KEY_SESSION_ID = "session_id"
         const val ACTION_STATE = "com.sergiogimenez.nocturne.UPLOAD_STATE"
         const val EXTRA_MESSAGE = "message"
+        const val EXTRA_SESSION_ID = "uploaded_session_id"
+        const val EXTRA_UPLOADED = "uploaded"
         private const val PROGRESS_CHANNEL_ID = "background-uploads"
         private const val RESULT_CHANNEL_ID = "upload-results"
         private const val FOREGROUND_NOTIFICATION_ID = 84

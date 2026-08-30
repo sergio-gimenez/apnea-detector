@@ -12,8 +12,22 @@ from sqlalchemy.orm import Session
 
 from .models import AudioChunk, RespiratoryEvent, SignalPoint, SleepSession
 from .oximetry import analyze_oximetry, match_desaturation
+from .snoring import (
+    ENVELOPE_HZ,
+    SNORE_VERSION,
+    band_envelope,
+    detect_bursts,
+    keep_loud_bursts,
+    detect_snore_gaps,
+    rolling_floor,
+    snoring_burden,
+    snoring_epochs,
+    to_dbfs,
+)
 
-ALGORITHM_VERSION = "dsp-v0.1.0"
+ALGORITHM_VERSION = "dsp-v0.2.0"
+LEGACY_ALGORITHM_VERSION = "dsp-v0.1.0"
+AVAILABLE_ALGORITHMS = (ALGORITHM_VERSION, LEGACY_ALGORITHM_VERSION)
 
 
 def _as_utc(value):
@@ -122,7 +136,14 @@ def detect_candidates(energy_dbfs: np.ndarray) -> tuple[list[dict], float]:
     return candidates, threshold
 
 
-def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
+def analyze_session(
+    db: Session,
+    session: SleepSession,
+    data_root: Path,
+    algorithm: str = ALGORITHM_VERSION,
+) -> int:
+    if algorithm not in AVAILABLE_ALGORITHMS:
+        raise ValueError(f"Unknown algorithm {algorithm}")
     chunks = list(
         db.scalars(
             select(AudioChunk)
@@ -141,31 +162,57 @@ def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
     seconds = math.ceil(total_samples / sample_rate)
     sum_squares = np.zeros(seconds, dtype=np.float64)
     counts = np.zeros(seconds, dtype=np.int64)
+    envelope = np.zeros(seconds * ENVELOPE_HZ, dtype=np.float64)
 
     for chunk in chunks:
         path = data_root / chunk.filename
         with wave.open(str(path), "rb") as wav_file:
             samples = np.frombuffer(wav_file.readframes(wav_file.getnframes()), dtype="<i2")
+        offset = timeline_offsets[chunk.id]
         cursor = 0
         while cursor < samples.size:
-            absolute = timeline_offsets[chunk.id] + cursor
+            absolute = offset + cursor
             second = absolute // sample_rate
             take = min(samples.size - cursor, sample_rate - (absolute % sample_rate))
             frame = samples[cursor : cursor + take].astype(np.float64)
             sum_squares[second] += np.dot(frame, frame)
             counts[second] += take
             cursor += take
+        # the 20 Hz band-limited envelope the snore detector runs on
+        chunk_envelope = band_envelope(samples, sample_rate)
+        start_frame = round(offset / sample_rate * ENVELOPE_HZ)
+        end_frame = min(envelope.size, start_frame + chunk_envelope.size)
+        if end_frame > start_frame:
+            envelope[start_frame:end_frame] = chunk_envelope[: end_frame - start_frame]
 
     energy = np.full(seconds, np.nan, dtype=np.float64)
     populated = counts > 0
     rms = np.sqrt(sum_squares[populated] / counts[populated])
     energy[populated] = 20.0 * np.log10(np.maximum(rms, 1.0) / 32768.0)
-    candidates, _ = detect_candidates(energy)
+
+    envelope_db = to_dbfs(envelope)
+    floor_db = rolling_floor(envelope_db)
+    bursts = keep_loud_bursts(detect_bursts(envelope_db, floor_db))
+    epochs = snoring_epochs(bursts, float(seconds))
+    burden = snoring_burden(epochs)
+
+    if algorithm == LEGACY_ALGORITHM_VERSION:
+        candidates, _ = detect_candidates(energy)
+    else:
+        candidates = [
+            {
+                "start": gap.start,
+                "duration": gap.duration,
+                "confidence": gap.confidence,
+                "evidence": gap.evidence,
+            }
+            for gap in detect_snore_gaps(envelope_db, floor_db, bursts)
+        ]
 
     db.execute(
         delete(SignalPoint).where(
             SignalPoint.session_id == session.id,
-            SignalPoint.signal_type == "audio_energy",
+            SignalPoint.signal_type.in_(("audio_energy", "snore_rate")),
         )
     )
     previous_reviews = [
@@ -189,7 +236,24 @@ def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
                     signal_type="audio_energy",
                     value=float(np.mean(window)),
                     unit="dBFS",
-                    source=ALGORITHM_VERSION,
+                    source=algorithm,
+                    device="phone microphone",
+                )
+            )
+
+    for index, snoring in enumerate(epochs):
+        if snoring:
+            offset = index * 30
+            db.add(
+                SignalPoint(
+                    session_id=session.id,
+                    timestamp_utc=started_at + timedelta(seconds=offset),
+                    signal_type="snore_rate",
+                    value=float(
+                        sum(offset <= burst.start < offset + 30 for burst in bursts) * 2
+                    ),
+                    unit="bursts/min",
+                    source=SNORE_VERSION,
                     device="phone microphone",
                 )
             )
@@ -245,11 +309,13 @@ def analyze_session(db: Session, session: SleepSession, data_root: Path) -> int:
                 duration_seconds=candidate["duration"],
                 confidence=min(0.99, round(confidence, 3)),
                 evidence_json=json.dumps(evidence),
-                algorithm_version=ALGORITHM_VERSION,
+                algorithm_version=algorithm,
                 review_status=matching_review.review_status if matching_review else "unreviewed",
             )
         )
 
     session.total_samples = sum(chunk.sample_count for chunk in chunks)
+    session.snoring_burden_percent = burden
+    session.snore_bursts = len(bursts)
     db.commit()
     return len(candidates)

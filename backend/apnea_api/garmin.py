@@ -10,7 +10,7 @@ from garminconnect import Garmin
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .models import SignalPoint, SleepSession
+from .models import SignalPoint, SleepArchitecture, SleepSession
 
 UNITS = {"heart_rate": "bpm", "spo2": "%", "respiration_rate": "breaths/min"}
 
@@ -108,6 +108,77 @@ def normalize_payload(payload: Any) -> list[tuple[datetime, str, float]]:
     return list(dict.fromkeys(points))
 
 
+def _sleep_architecture(payload: Any) -> dict | None:
+    """Pull the nightly stage breakdown out of a get_sleep_data payload."""
+    if not isinstance(payload, dict):
+        return None
+    daily = payload.get("dailySleepDTO")
+    if not isinstance(daily, dict) or not daily.get("calendarDate"):
+        return None
+    scores = daily.get("sleepScores") or {}
+    overall = scores.get("overall") if isinstance(scores, dict) else None
+    score = overall.get("value") if isinstance(overall, dict) else None
+
+    def number(*keys):
+        for source in (daily, payload):
+            for key in keys:
+                value = source.get(key) if isinstance(source, dict) else None
+                if isinstance(value, (int, float)):
+                    return value
+        return None
+
+    return {
+        "calendar_date": str(daily["calendarDate"]),
+        "sleep_score": int(score) if isinstance(score, (int, float)) else None,
+        "deep_seconds": number("deepSleepSeconds"),
+        "light_seconds": number("lightSleepSeconds"),
+        "rem_seconds": number("remSleepSeconds"),
+        "awake_seconds": number("awakeSleepSeconds"),
+        "sleep_seconds": number("sleepTimeSeconds"),
+        "awake_count": number("awakeCount"),
+        "restless_moments": number("restlessMomentsCount"),
+        "average_respiration": number("averageRespirationValue", "avgRespirationValue"),
+        "lowest_respiration": number("lowestRespirationValue"),
+        "average_stress": number("avgSleepStress", "averageSleepStress"),
+    }
+
+
+def _store_architecture(db: Session, session: SleepSession, payloads: list[Any]) -> dict | None:
+    """Keep the stage breakdown whose date best matches the recorded night."""
+    found = [record for record in (_sleep_architecture(p) for p in payloads) if record]
+    if not found:
+        return None
+    target = _as_local_date(session)
+    best = min(found, key=lambda record: abs_days(record["calendar_date"], target))
+    existing = db.scalar(
+        select(SleepArchitecture).where(SleepArchitecture.session_id == session.id)
+    )
+    if existing is None:
+        existing = SleepArchitecture(session_id=session.id)
+        db.add(existing)
+    for key, value in best.items():
+        if key in {"calendar_date"}:
+            setattr(existing, key, value)
+        elif value is not None:
+            setattr(existing, key, int(value) if key.endswith(("_seconds", "_count", "_moments", "_score")) else float(value))
+    existing.updated_at = datetime.now(timezone.utc)
+    existing.source = "garmin-connect"
+    return best
+
+
+def _as_local_date(session: SleepSession) -> str:
+    start = session.started_at_utc
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    # a night starting before midnight is reported by Garmin under the next day
+    return (start + timedelta(hours=6)).date().isoformat()
+
+
+def abs_days(left: str, right: str) -> int:
+    fmt = "%Y-%m-%d"
+    return abs((datetime.strptime(left, fmt) - datetime.strptime(right, fmt)).days)
+
+
 def import_for_session(
     db: Session,
     session: SleepSession,
@@ -188,8 +259,15 @@ def import_for_session(
         )
         imported += 1
         counts[signal_type] = counts.get(signal_type, 0) + 1
+    architecture = _store_architecture(db, session, payloads)
     db.commit()
-    return {"imported": imported, "counts": counts, "dates": dates, "warnings": warnings}
+    return {
+        "imported": imported,
+        "counts": counts,
+        "dates": dates,
+        "warnings": warnings,
+        "architecture": architecture,
+    }
 
 
 def login_cli() -> None:

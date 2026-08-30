@@ -14,19 +14,56 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .analysis import (
     ALGORITHM_VERSION,
+    AVAILABLE_ALGORITHMS,
     analyze_session,
     chunk_timeline_sample_offset,
     session_elapsed_seconds,
 )
 from .garmin import import_for_session
 from .oximetry import OximetryResult, analyze_oximetry
-from .models import AudioChunk, Base, RespiratoryEvent, SignalPoint, SleepSession, utc_now
+from .models import (
+    AudioChunk,
+    Base,
+    RespiratoryEvent,
+    SignalPoint,
+    SleepArchitecture,
+    SleepSession,
+    utc_now,
+)
 from .schemas import GarminImportRequest, ReviewUpdate, SessionCreate, SignalBatch
+
+
+def add_missing_columns(engine) -> None:
+    """Add columns introduced after a database was first created.
+
+    create_all() adds new tables but never new columns, and this prototype has no
+    migration tool, so nightly data would otherwise have to be thrown away to pick
+    up a new field. Only additive, nullable/defaulted columns belong here.
+    """
+    inspector = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        if table.name not in inspector.get_table_names():
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            if not column.nullable and column.default is None:
+                raise RuntimeError(
+                    f"Cannot add required column {table.name}.{column.name} automatically"
+                )
+            kind = column.type.compile(engine.dialect)
+            default = column.default.arg if column.default is not None else None
+            clause = f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {kind}'
+            if default is not None and not callable(default):
+                clause += f" DEFAULT {default!r}" if isinstance(default, str) else f" DEFAULT {default}"
+            with engine.begin() as connection:
+                connection.execute(text(clause))
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -44,6 +81,8 @@ def _session_json(row: SleepSession) -> dict:
         "sample_rate": row.sample_rate,
         "total_samples": row.total_samples,
         "chunk_count": len(row.chunks),
+        "snoring_burden_percent": round(row.snoring_burden_percent or 0.0, 1),
+        "snore_bursts": row.snore_bursts or 0,
         "recorded_seconds": row.total_samples / row.sample_rate if row.sample_rate else 0,
         "duration_seconds": duration,
         "created_at": _as_utc(row.created_at).isoformat(),
@@ -81,6 +120,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
 
     database = sessionmaker(engine, expire_on_commit=False)
     Base.metadata.create_all(engine)
+    add_missing_columns(engine)
 
     app = FastAPI(title="Apnea screening prototype", version="0.1.0")
     api_token = os.getenv("APNEA_API_TOKEN")
@@ -247,10 +287,14 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         return {"status": "complete", "events": events}
 
     @app.post("/api/sessions/{session_id}/analyze")
-    def rerun_analysis(session_id: str, db: Session = Depends(get_db)) -> dict:
+    def rerun_analysis(
+        session_id: str, algorithm: str = ALGORITHM_VERSION, db: Session = Depends(get_db)
+    ) -> dict:
+        if algorithm not in AVAILABLE_ALGORITHMS:
+            raise HTTPException(422, f"algorithm must be one of {list(AVAILABLE_ALGORITHMS)}")
         session = get_session_or_404(session_id, db)
-        events = analyze_session(db, session, root)
-        return {"events": events, "algorithm_version": ALGORITHM_VERSION}
+        events = analyze_session(db, session, root, algorithm=algorithm)
+        return {"events": events, "algorithm_version": algorithm}
 
     @app.post("/api/sessions/{session_id}/signals")
     def add_signals(
@@ -431,9 +475,41 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             for event in events
             if (json.loads(event.evidence_json).get("spo2_drop") or 0) >= 3.0
         )
+        architecture = db.scalar(
+            select(SleepArchitecture).where(SleepArchitecture.session_id == session_id)
+        )
+        sleep_seconds = (architecture.sleep_seconds or 0) if architecture else 0
+
+        def stage_percent(value: int | None) -> float | None:
+            if not architecture or not sleep_seconds or value is None:
+                return None
+            return round(100.0 * value / sleep_seconds, 1)
+
         return {
             "hours_analyzed": round(hours, 3),
             "suspected_events": len(events),
+            "algorithm_version": events[0].algorithm_version if events else ALGORITHM_VERSION,
+            "snoring_burden_percent": round(session.snoring_burden_percent or 0.0, 1),
+            "snore_bursts": session.snore_bursts or 0,
+            "sleep_architecture": None
+            if architecture is None
+            else {
+                "calendar_date": architecture.calendar_date,
+                "sleep_score": architecture.sleep_score,
+                "sleep_hours": round(sleep_seconds / 3600, 2) if sleep_seconds else None,
+                "deep_percent": stage_percent(architecture.deep_seconds),
+                "light_percent": stage_percent(architecture.light_seconds),
+                "rem_percent": stage_percent(architecture.rem_seconds),
+                "awake_count": architecture.awake_count,
+                "restless_moments": architecture.restless_moments,
+                "average_respiration": architecture.average_respiration,
+                "lowest_respiration": architecture.lowest_respiration,
+                "note": (
+                    "Vendor sleep staging and score are proprietary context, not screening "
+                    "metrics. Light-heavy architecture with many restless moments is "
+                    "consistent with fragmented sleep but is not specific to apnea."
+                ),
+            },
             "srei": round(len(events) / hours, 2) if hours else None,
             "events_over_20s": sum(event.duration_seconds >= 20 for event in events),
             "events_over_30s": sum(event.duration_seconds >= 30 for event in events),

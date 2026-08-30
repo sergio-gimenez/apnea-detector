@@ -24,6 +24,8 @@ class SleepSession(Base):
     started_at_monotonic_ns: Mapped[int] = mapped_column(BigInteger)
     sample_rate: Mapped[int] = mapped_column(Integer, default=16_000)
     total_samples: Mapped[int] = mapped_column(BigInteger, default=0)
+    snoring_burden_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    snore_bursts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -35,6 +37,9 @@ class SleepSession(Base):
     )
     events: Mapped[list[RespiratoryEvent]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
+    )
+    architecture: Mapped[SleepArchitecture | None] = relationship(
+        back_populates="session", cascade="all, delete-orphan", uselist=False
     )
 
 
@@ -85,3 +90,35 @@ class RespiratoryEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     session: Mapped[SleepSession] = relationship(back_populates="events")
+
+
+class SleepArchitecture(Base):
+    """Nightly sleep-stage breakdown as reported by the wearable.
+
+    Kept separate from SignalPoint because these are one-per-night summaries from
+    the vendor's own scoring, not samples on the session timeline. The score is a
+    proprietary composite, so it is stored as context, never as a screening metric.
+    """
+
+    __tablename__ = "sleep_architecture"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sleep_sessions.id", ondelete="CASCADE"), unique=True
+    )
+    calendar_date: Mapped[str] = mapped_column(String(10))
+    sleep_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deep_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    light_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rem_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    awake_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sleep_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    awake_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    restless_moments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    average_respiration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lowest_respiration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_stress: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(80), default="garmin")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    session: Mapped[SleepSession] = relationship(back_populates="architecture")

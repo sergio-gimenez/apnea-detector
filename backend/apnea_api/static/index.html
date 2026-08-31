@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=8">
+    <link rel="stylesheet" href="/styles.css?v=9">
   </head>
   <body>
     <header>
@@ -58,6 +58,13 @@
           </div>
           <p class="hint" id="label-help">Listen to the whole clip. Was there a pause in breathing or snoring? You are not told whether the detector flagged this one.</p>
           <audio id="label-audio" controls preload="auto"></audio>
+          <div class="audio-tools">
+            <label>Volume boost <input id="label-gain" type="range" min="1" max="12" step="0.5" value="4"></label>
+            <output id="label-gain-val">4×</output>
+            <label class="chk"><input id="label-compress" type="checkbox" checked> lift quiet parts</label>
+          </div>
+          <canvas id="label-wave" height="200"></canvas>
+          <p class="hint" id="label-wave-hint">Loudness of this clip. Click the trace to jump there. The detector's own marks stay hidden until you label.</p>
           <div id="label-buttons" class="label-buttons">
             <button data-label="pause">PAUSE PRESENT</button>
             <button data-label="no_pause">NO PAUSE</button>
@@ -65,7 +72,6 @@
           </div>
           <div id="label-reveal" class="hidden">
             <div id="label-verdict"></div>
-            <canvas id="label-wave" height="200"></canvas>
             <p class="hint">Cyan: loudness envelope. Grey: local floor. Dashed: snore-burst threshold. Purple: detected bursts. Shaded: the window in question. Amber: SpO₂. Ticks mark clip seconds; the white marker follows the audio as it plays.</p>
             <button id="label-next">NEXT CLIP →</button>
           </div>
@@ -84,6 +90,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=8"></script>
+    <script src="/app.js?v=9"></script>
   </body>
 </html>

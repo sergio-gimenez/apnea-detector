@@ -164,6 +164,49 @@ const authedBlob = async (url) => {
   return URL.createObjectURL(await response.blob());
 };
 
+/* ---------- make quiet clips audible ----------
+   Overnight phone audio is quiet and wide-range: snores near 0 dBFS, the breaths
+   between them near the noise floor. A gain stage lifts the whole clip past 100 %
+   volume; an optional compressor pulls the quiet parts up without the snores
+   getting painful. All client-side, the stored audio is untouched. */
+const GAIN_KEY = 'apnea-label-gain';
+let audioChain = null;
+
+function ensureAudioChain() {
+  if (audioChain || audioChain === false) return audioChain;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const source = ctx.createMediaElementSource($('#label-audio'));
+    const gain = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -40; comp.knee.value = 25; comp.ratio.value = 6;
+    comp.attack.value = 0.004; comp.release.value = 0.18;
+    source.connect(gain);
+    audioChain = {ctx, gain, comp};
+    applyAudioChain();
+  } catch (error) {
+    audioChain = false; // unsupported: fall back to the native element
+  }
+  return audioChain;
+}
+
+function applyAudioChain() {
+  if (!audioChain) return;
+  const {ctx, gain, comp} = audioChain;
+  try { gain.disconnect(); } catch {}
+  try { comp.disconnect(); } catch {}
+  if ($('#label-compress').checked) { gain.connect(comp); comp.connect(ctx.destination); }
+  else { gain.connect(ctx.destination); }
+}
+
+function applyGain() {
+  const value = Number($('#label-gain').value);
+  $('#label-gain-val').textContent = `${value}×`;
+  if (audioChain) audioChain.gain.gain.value = value;
+  try { localStorage.setItem(GAIN_KEY, value); } catch {}
+}
+
 async function openLabeling(fresh) {
   // the panel always opens: a button that silently does nothing reads as broken
   $('#labeling').classList.remove('hidden');
@@ -192,6 +235,11 @@ async function openLabeling(fresh) {
   }
 }
 
+const showClipMedia = (on) => {
+  ['#label-wave', '#label-wave-hint', '#label-audio', '.audio-tools']
+    .forEach(selector => $(selector).classList.toggle('hidden', !on));
+};
+
 async function renderClip() {
   await renderStats();
   $('#label-reveal').classList.add('hidden');
@@ -199,15 +247,24 @@ async function renderClip() {
     $('#label-progress').textContent = 'All clips labelled';
     $('#label-help').textContent = 'Every clip in this batch has a label. The numbers below are the result.';
     $('#label-buttons').classList.add('hidden');
+    showClipMedia(false);
     $('#label-audio').removeAttribute('src');
+    waveData = null;
     return;
   }
   const item = batch[batchIndex];
   $('#label-buttons').classList.remove('hidden');
+  showClipMedia(true);
   $('#label-progress').textContent = `Clip ${batchIndex + 1} of ${batch.length} · ${wallTime(atOffset(item.start_offset_seconds))}`;
   $('#label-help').textContent = `This clip covers ${clockRange(item.start_offset_seconds, item.duration_seconds)} (${zoneLabel()}), plus 30 s of audio each side. Was there a pause in breathing or snoring? You are not told whether the detector flagged it.`;
+  $('#label-wave-hint').textContent = 'Loudness of this clip — click the trace to jump there and listen closely. Whether the detector flagged this clip, and where, stays hidden until you label.';
   const audio = $('#label-audio');
-  audio.src = await authedBlob(`/api/review-items/${item.id}/audio.wav`);
+  const [blob, waveform] = await Promise.all([
+    authedBlob(`/api/review-items/${item.id}/audio.wav`),
+    api(`/api/review-items/${item.id}/waveform`).catch(error => { announce(error.message); return null; }),
+  ]);
+  audio.src = blob;
+  if (waveform) drawWaveform(waveform, false);
 }
 
 async function labelClip(label) {
@@ -234,17 +291,20 @@ async function reveal(item, label) {
     ${item.event && item.event.evidence.recovery_gasp ? '<span class="badge">recovery gasp</span>' : ''}`;
   $('#label-reveal').classList.remove('hidden');
   $('#label-buttons').classList.add('hidden');
+  $('#label-wave-hint').textContent = 'Now with the detector shown: shaded = the window it judged, purple = snore bursts it found, dashed = its burst threshold, amber = SpO₂.';
   try {
-    drawWaveform(await api(`/api/review-items/${item.id}/waveform`));
+    drawWaveform(await api(`/api/review-items/${item.id}/waveform`), true);
   } catch (error) { announce(error.message); }
   await renderStats();
 }
 
-let waveData = null;   // last waveform payload, so the playhead can redraw it
-let waveToken = 0;     // invalidates the animation loop of a previous clip
+let waveData = null;      // last waveform payload, so the playhead can redraw it
+let waveAnnotated = false; // whether to draw the detector's own marks (post-label only)
+let waveToken = 0;        // invalidates the animation loop of a previous clip
 
-function drawWaveform(data) {
+function drawWaveform(data, annotated = false) {
   waveData = data;
+  waveAnnotated = annotated;
   const token = ++waveToken;
   renderWave();
   const audio = $('#label-audio');
@@ -257,6 +317,14 @@ function drawWaveform(data) {
       requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
+  };
+  // click the trace to jump the audio there
+  $('#label-wave').onclick = (clickEvent) => {
+    const box = $('#label-wave').getBoundingClientRect();
+    const span = Math.max(data.end_offset_seconds - data.start_offset_seconds, 0.001);
+    const seconds = (clickEvent.clientX - box.left - 8) / Math.max(box.width - 16, 1) * span;
+    audio.currentTime = Math.max(0, Math.min(seconds, audio.duration || span));
+    renderWave(audio.currentTime);
   };
 }
 
@@ -280,14 +348,18 @@ function renderWave(playSeconds = null) {
   const high = Math.max(...values) + 4;
   const y = (db) => 12 + (height - 40) * (1 - (db - low) / Math.max(high - low, 1));
 
+  // `annotated` toggles the detector's own marks. While labelling they stay off so
+  // the listener judges the sound, not the detector: no suspected window, no burst
+  // detections, no SpO₂. reveal() turns them on.
   const [ws, we] = data.window;
-  ctx.fillStyle = 'rgba(171,128,255,.14)';
-  ctx.fillRect(x(ws), 10, Math.max(2, x(we) - x(ws)), height - 34);
-
-  data.bursts.forEach(burst => {
-    ctx.fillStyle = 'rgba(171,128,255,.55)';
-    ctx.fillRect(x(burst.start), height - 26, Math.max(1.5, (width - 16) * burst.duration / span), 6);
-  });
+  if (waveAnnotated) {
+    ctx.fillStyle = 'rgba(171,128,255,.14)';
+    ctx.fillRect(x(ws), 10, Math.max(2, x(we) - x(ws)), height - 34);
+    data.bursts.forEach(burst => {
+      ctx.fillStyle = 'rgba(171,128,255,.55)';
+      ctx.fillRect(x(burst.start), height - 26, Math.max(1.5, (width - 16) * burst.duration / span), 6);
+    });
+  }
 
   const line = (series, color, dash = []) => {
     ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.setLineDash(dash); ctx.beginPath();
@@ -299,10 +371,10 @@ function renderWave(playSeconds = null) {
     ctx.stroke(); ctx.setLineDash([]);
   };
   line(data.floor_dbfs, '#4a5860');
-  line(data.floor_dbfs.map(value => value + data.burst_threshold_db), '#6c7a84', [4, 4]);
+  if (waveAnnotated) line(data.floor_dbfs.map(value => value + data.burst_threshold_db), '#6c7a84', [4, 4]);
   line(data.envelope_dbfs, '#58d6d0');
 
-  if (data.spo2.length > 1) {
+  if (waveAnnotated && data.spo2.length > 1) {
     const lows = Math.min(...data.spo2.map(p => p.value)) - 1;
     const highs = Math.max(...data.spo2.map(p => p.value)) + 1;
     ctx.strokeStyle = '#f0ad4e'; ctx.lineWidth = 1.6; ctx.beginPath();
@@ -327,8 +399,10 @@ function renderWave(playSeconds = null) {
   }
 
   // where the window in question sits, in clip seconds
-  ctx.fillStyle = '#b79bff';
-  ctx.fillText(`window ${(ws - t0).toFixed(1)}–${(we - t0).toFixed(1)}s`, Math.min(x(ws) + 4, width - 150), 20);
+  if (waveAnnotated) {
+    ctx.fillStyle = '#b79bff';
+    ctx.fillText(`window ${(ws - t0).toFixed(1)}–${(we - t0).toFixed(1)}s`, Math.min(x(ws) + 4, width - 150), 20);
+  }
 
   // playhead: follows the audio scrubber
   if (playSeconds != null && isFinite(playSeconds)) {
@@ -357,6 +431,19 @@ async function renderStats() {
 document.querySelectorAll('[data-label]').forEach(button => {
   button.onclick = () => labelClip(button.dataset.label);
 });
+
+try {
+  const saved = localStorage.getItem(GAIN_KEY);
+  if (saved) $('#label-gain').value = saved;
+} catch {}
+$('#label-gain-val').textContent = `${Number($('#label-gain').value)}×`;
+$('#label-gain').oninput = applyGain;
+$('#label-compress').onchange = applyAudioChain;
+$('#label-audio').addEventListener('play', () => {
+  const chain = ensureAudioChain();
+  if (chain) { chain.ctx.resume(); applyGain(); }
+});
+
 $('#label-next').onclick = () => { batchIndex += 1; renderClip(); };
 $('#label').onclick = () => openLabeling(false);
 $('#label-new').onclick = () => openLabeling(true);

@@ -34,7 +34,12 @@ button.ghost { background:transparent;color:var(--muted); }
 .label-buttons { display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0; }
 .label-buttons button { padding:16px 8px;font-weight:700; }
 .label-buttons button[data-label="pause"] { border-color:#5b4a7a; }
-#label-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px; }
+#label-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px;cursor:pointer; }
+.audio-tools { display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:8px 0 4px;font:12px 'DM Mono',monospace;color:var(--muted); }
+.audio-tools label { display:flex;align-items:center;gap:8px; }
+.audio-tools input[type=range] { accent-color:var(--cyan); }
+.audio-tools input[type=checkbox] { accent-color:var(--cyan); }
+.audio-tools output { color:var(--cyan);min-width:34px; }
 #label-verdict { display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px;font:12px 'DM Mono'; }
 #label-verdict .badge { padding:5px 10px;border:1px solid var(--line); }
 #label-verdict .candidate { color:var(--purple);border-color:var(--purple); }

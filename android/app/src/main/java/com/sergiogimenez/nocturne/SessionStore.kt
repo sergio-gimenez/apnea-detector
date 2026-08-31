@@ -104,11 +104,20 @@ class SessionStore(private val context: Context) {
         save(current.copy(status = "uploaded", uploadedAtUtc = Instant.now().toString()))
     }
 
-    /** Deletes the local WAV chunks of an already uploaded session. Metadata is kept. */
+    /**
+     * Deletes the local WAV chunks of a session. Metadata is kept.
+     *
+     * `force` allows discarding a capture the backend never received, which is the
+     * only way to reclaim space from a night that failed to upload or is not wanted.
+     * Callers must confirm that separately: for an unuploaded capture this is the
+     * point where the recording is lost for good.
+     */
     @Synchronized
-    fun deleteAudio(sessionId: String): Long {
+    fun deleteAudio(sessionId: String, force: Boolean = false): Long {
         val current = requireNotNull(load(sessionId)) { "Session metadata missing" }
-        check(current.status == "uploaded") { "Only uploaded captures can be deleted locally" }
+        check(force || current.status == "uploaded") {
+            "Only uploaded captures can be deleted locally"
+        }
         check(!current.audioDeleted) { "Local audio was already deleted" }
         var freed = 0L
         current.chunks.forEach { chunk ->

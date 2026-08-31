@@ -27,8 +27,18 @@ class UploadWorker(
         createNotificationChannels()
         setForeground(foregroundInfo("Preparing upload…"))
         return try {
-            val chunks = BackendClient(backendUrl, token, store).upload(sessionId) { progress ->
-                notificationManager.notify(FOREGROUND_NOTIFICATION_ID, progressNotification(progress))
+            var lastPercent = -1
+            val chunks = BackendClient(backendUrl, token, store).upload(sessionId) { done, total, label ->
+                val percent = if (total > 0) done * 100 / total else 0
+                // one update per whole percent: a long night is hundreds of chunks
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    notificationManager.notify(
+                        FOREGROUND_NOTIFICATION_ID,
+                        progressNotification("$label · $percent%", done, total),
+                    )
+                    sendProgress(sessionId, percent, label)
+                }
             }
             store.markUploaded(sessionId)
             val message = "$chunks chunks uploaded and analyzed."
@@ -68,16 +78,18 @@ class UploadWorker(
         }
     }
 
-    private fun progressNotification(text: String) = NotificationCompat.Builder(
-        applicationContext,
-        PROGRESS_CHANNEL_ID,
-    )
+    private fun progressNotification(
+        text: String,
+        done: Int = 0,
+        total: Int = 0,
+    ) = NotificationCompat.Builder(applicationContext, PROGRESS_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_sys_upload)
         .setContentTitle("Nocturne upload")
         .setContentText(text)
         .setContentIntent(openApp())
         .setOngoing(true)
         .setOnlyAlertOnce(true)
+        .setProgress(total, done, total <= 0)
         .build()
 
     private fun resultNotification(text: String, failed: Boolean) = NotificationCompat.Builder(
@@ -118,13 +130,24 @@ class UploadWorker(
         )
     }
 
+    private fun sendProgress(sessionId: String, percent: Int, label: String) {
+        applicationContext.sendBroadcast(
+            Intent(ACTION_STATE)
+                .setPackage(applicationContext.packageName)
+                .putExtra(EXTRA_MESSAGE, "$label · $percent%")
+                .putExtra(EXTRA_SESSION_ID, sessionId)
+                .putExtra(EXTRA_PROGRESS, percent),
+        )
+    }
+
     private fun sendState(message: String, sessionId: String? = null, uploaded: Boolean = false) {
         applicationContext.sendBroadcast(
             Intent(ACTION_STATE)
                 .setPackage(applicationContext.packageName)
                 .putExtra(EXTRA_MESSAGE, message)
                 .putExtra(EXTRA_SESSION_ID, sessionId ?: uploadedSessionId())
-                .putExtra(EXTRA_UPLOADED, uploaded),
+                .putExtra(EXTRA_UPLOADED, uploaded)
+                .putExtra(EXTRA_PROGRESS, -1),
         )
     }
 
@@ -137,6 +160,7 @@ class UploadWorker(
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_SESSION_ID = "uploaded_session_id"
         const val EXTRA_UPLOADED = "uploaded"
+        const val EXTRA_PROGRESS = "progress"
         private const val PROGRESS_CHANNEL_ID = "background-uploads"
         private const val RESULT_CHANNEL_ID = "upload-results"
         private const val FOREGROUND_NOTIFICATION_ID = 84

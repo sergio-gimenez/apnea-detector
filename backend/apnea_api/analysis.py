@@ -206,7 +206,7 @@ def analyze_session(
                 "confidence": gap.confidence,
                 "evidence": gap.evidence,
             }
-            for gap in detect_snore_gaps(envelope_db, floor_db, bursts)
+            for gap in detect_snore_gaps(envelope_db, floor_db, bursts, epochs)
         ]
 
     db.execute(

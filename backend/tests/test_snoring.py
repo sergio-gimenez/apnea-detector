@@ -143,3 +143,19 @@ def test_faint_noise_is_not_counted_as_snoring():
     assert len(loud) < len(raw)
     faint = [b for b in loud if 230 < b.start < 350]
     assert not faint, "faint blips must not be treated as snoring"
+
+
+def test_pause_needs_established_snoring_around_it():
+    """Isolated bursts in a mostly quiet night must not produce candidates."""
+    samples = synth_night(600, breath_period=20.0, gaps=((300.0, 60.0),))
+    envelope, floor, bursts = analyse(samples)
+    mask = snoring_epochs(bursts, 600)
+    assert snoring_burden(mask) < 10, "sparse bursts should not count as snoring"
+    assert detect_snore_gaps(envelope, floor, bursts, mask) == []
+
+
+def test_candidates_survive_when_snoring_is_established():
+    samples = synth_night(600, gaps=((300.0, 25.0),))
+    envelope, floor, bursts = analyse(samples)
+    mask = snoring_epochs(bursts, 600)
+    assert len(detect_snore_gaps(envelope, floor, bursts, mask)) == 1

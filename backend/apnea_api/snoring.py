@@ -55,7 +55,7 @@ GAP_MAX_SECONDS = 120.0
 GAP_QUIET_MARGIN_DB = 8.0
 GAP_MARGIN_SECONDS = 0.5
 PRE_CONTEXT_SECONDS = 60.0
-PRE_CONTEXT_MIN_BURSTS = 3
+PRE_CONTEXT_MIN_BURSTS = 6
 POST_CONTEXT_SECONDS = 30.0
 POST_CONTEXT_MIN_BURSTS = 2
 RECOVERY_GASP_DB = 3.0
@@ -190,9 +190,19 @@ def _bursts_between(bursts: list[SnoreBurst], start: float, end: float) -> list[
 
 
 def detect_snore_gaps(
-    envelope_db: np.ndarray, floor_db: np.ndarray, bursts: list[SnoreBurst]
+    envelope_db: np.ndarray,
+    floor_db: np.ndarray,
+    bursts: list[SnoreBurst],
+    snoring_mask: np.ndarray | None = None,
 ) -> list[SnoreGap]:
-    """Silences that interrupt established snoring and are followed by its return."""
+    """Silences that interrupt established snoring and are followed by its return.
+
+    `snoring_mask` is the per-epoch snoring flag. Requiring the pause to begin inside
+    a snoring epoch is what keeps candidate counts tied to how much the sleeper
+    actually snored: without it, two nights whose snoring burden differed by 2.5x
+    produced nearly the same number of candidates, because isolated bursts in an
+    otherwise quiet night were being treated as interrupted snoring.
+    """
     gaps: list[SnoreGap] = []
     for previous, following in zip(bursts, bursts[1:]):
         gap_start = previous.end
@@ -203,6 +213,11 @@ def detect_snore_gaps(
         before = _bursts_between(bursts, gap_start - PRE_CONTEXT_SECONDS, gap_start)
         if len(before) < PRE_CONTEXT_MIN_BURSTS:
             continue
+        if snoring_mask is not None and snoring_mask.size:
+            epoch = int(gap_start // EPOCH_SECONDS)
+            neighbours = snoring_mask[max(0, epoch - 1) : epoch + 1]
+            if not neighbours.size or not neighbours.any():
+                continue
         after = _bursts_between(
             bursts, following.start, following.start + POST_CONTEXT_SECONDS
         )

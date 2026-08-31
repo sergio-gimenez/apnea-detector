@@ -28,13 +28,16 @@ class BackendClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonType = "application/json".toMediaType()
 
-    suspend fun upload(sessionId: String, progress: (String) -> Unit): Int = withContext(Dispatchers.IO) {
+    suspend fun upload(
+        sessionId: String,
+        progress: (done: Int, total: Int, label: String) -> Unit,
+    ): Int = withContext(Dispatchers.IO) {
         store.recoverPending(sessionId)
         val session = requireNotNull(store.load(sessionId)) { "Session metadata missing" }
         require(baseUrl.startsWith("https://")) {
             "Backend URL must use HTTPS"
         }
-        progress("Creating remote session")
+        progress(0, session.chunks.size, "Preparing upload")
         postJson(
             "/api/sessions",
             json.encodeToString(
@@ -48,7 +51,7 @@ class BackendClient(
             ),
         )
         session.chunks.forEachIndexed { index, chunk ->
-            progress("Uploading chunk ${index + 1} / ${session.chunks.size}")
+            progress(index, session.chunks.size, "Uploading audio")
             val file = store.chunkFile(sessionId, chunk.fileName)
             check(file.exists()) { "Missing ${chunk.fileName}" }
             val body = MultipartBody.Builder()
@@ -62,7 +65,7 @@ class BackendClient(
                 .build()
             execute(Request.Builder().url("$baseUrl/api/sessions/$sessionId/audio-chunks").post(body))
         }
-        progress("Running initial analysis")
+        progress(session.chunks.size, session.chunks.size, "Analyzing on the server")
         postJson("/api/sessions/$sessionId/complete", "")
         session.chunks.size
     }

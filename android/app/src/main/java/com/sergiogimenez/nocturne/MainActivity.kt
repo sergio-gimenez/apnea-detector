@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -88,7 +89,8 @@ private fun RecorderApp() {
     var token by remember { mutableStateOf(store.apiToken) }
     var message by remember { mutableStateOf("") }
     var pendingStart by remember { mutableStateOf(false) }
-    var deletePrompt by remember { mutableStateOf<SessionManifest?>(null) }
+    var deletePrompt by remember { mutableStateOf<DeleteRequest?>(null) }
+    var uploadProgress by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var clockTick by remember { mutableStateOf(Instant.now().epochSecond) }
     val scope = rememberCoroutineScope()
 
@@ -103,7 +105,7 @@ private fun RecorderApp() {
      */
     fun requestDelete(session: SessionManifest) {
         if (session.status == "uploaded") {
-            deletePrompt = session
+            deletePrompt = DeleteRequest(session, verified = true)
             return
         }
         scope.launch {
@@ -115,20 +117,38 @@ private fun RecorderApp() {
                 BackendClient(backendUrl, token, store).uploadedChunkCount(session.id)
             }.onSuccess { remote ->
                 when {
-                    remote == null ->
-                        message = "The backend has no copy of this capture. Upload it before deleting."
-                    remote < session.chunks.size ->
-                        message = "The backend holds $remote of ${session.chunks.size} chunks. " +
-                            "Upload again before deleting."
+                    remote == null -> {
+                        message = ""
+                        deletePrompt = DeleteRequest(
+                            session,
+                            verified = false,
+                            reason = "The backend has no copy of this capture.",
+                        )
+                    }
+                    remote < session.chunks.size -> {
+                        message = ""
+                        deletePrompt = DeleteRequest(
+                            session,
+                            verified = false,
+                            reason = "The backend holds only $remote of ${session.chunks.size} chunks.",
+                        )
+                    }
                     else -> {
                         store.markUploaded(session.id)
                         refresh()
-                        deletePrompt = store.load(session.id)
                         message = "Backend copy confirmed: $remote chunks."
+                        store.load(session.id)?.let {
+                            deletePrompt = DeleteRequest(it, verified = true)
+                        }
                     }
                 }
             }.onFailure { error ->
-                message = error.message ?: "Could not verify the backend copy"
+                message = ""
+                deletePrompt = DeleteRequest(
+                    session,
+                    verified = false,
+                    reason = "Could not reach the backend (${error.message ?: "unknown error"}).",
+                )
             }
         }
     }
@@ -173,8 +193,15 @@ private fun RecorderApp() {
                     message = intent.getStringExtra(UploadWorker.EXTRA_MESSAGE) ?: "Upload state changed."
                     refresh()
                     val uploadedId = intent.getStringExtra(UploadWorker.EXTRA_SESSION_ID)
+                    val percent = intent.getIntExtra(UploadWorker.EXTRA_PROGRESS, -1)
+                    if (uploadedId != null && percent >= 0) {
+                        uploadProgress = uploadProgress + (uploadedId to percent)
+                    }
                     if (intent.getBooleanExtra(UploadWorker.EXTRA_UPLOADED, false) && uploadedId != null) {
-                        deletePrompt = store.load(uploadedId)?.takeUnless { it.audioDeleted }
+                        uploadProgress = uploadProgress - uploadedId
+                        store.load(uploadedId)?.takeUnless { it.audioDeleted }?.let {
+                            deletePrompt = DeleteRequest(it, verified = true)
+                        }
                     }
                     return
                 }
@@ -265,6 +292,7 @@ private fun RecorderApp() {
                     SessionRow(
                         session = session,
                         localBytes = if (session.audioDeleted) 0L else store.audioBytes(session.id),
+                        progressPercent = uploadProgress[session.id],
                         onDelete = { requestDelete(session) },
                         onUpload = {
                         store.backendUrl = backendUrl
@@ -299,13 +327,13 @@ private fun RecorderApp() {
                 item { Spacer(Modifier.height(40.dp)) }
             }
 
-            deletePrompt?.let { candidate ->
+            deletePrompt?.let { request ->
                 DeleteAudioDialog(
-                    session = candidate,
-                    bytes = store.audioBytes(candidate.id),
+                    request = request,
+                    bytes = store.audioBytes(request.session.id),
                     onDismiss = { deletePrompt = null },
                     onConfirm = {
-                        runCatching { store.deleteAudio(candidate.id) }
+                        runCatching { store.deleteAudio(request.session.id, force = !request.verified) }
                             .onSuccess { freed ->
                                 message = "Deleted ${formatBytes(freed)} of local audio. Backend copy kept."
                             }
@@ -321,27 +349,51 @@ private fun RecorderApp() {
     }
 }
 
+/** A pending deletion, and whether the backend was confirmed to hold the audio. */
+private data class DeleteRequest(
+    val session: SessionManifest,
+    val verified: Boolean,
+    val reason: String? = null,
+)
+
 @Composable
 private fun DeleteAudioDialog(
-    session: SessionManifest,
+    request: DeleteRequest,
     bytes: Long,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    val session = request.session
+    val night = session.startedAtUtc.take(16).replace('T', ' ')
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Panel,
-        title = { Text("Delete local audio?", color = Color.White) },
+        title = {
+            Text(
+                if (request.verified) "Delete local audio?" else "This night is not backed up",
+                color = if (request.verified) Color.White else Amber,
+            )
+        },
         text = {
             Text(
-                "The ${session.chunks.size} chunks of ${session.startedAtUtc.take(16).replace('T', ' ')} " +
-                    "(${formatBytes(bytes)}) are confirmed on the backend. Deleting them here frees space on the phone " +
-                    "and cannot be undone. Recording metadata stays.",
+                if (request.verified) {
+                    "The ${session.chunks.size} chunks of $night (${formatBytes(bytes)}) are confirmed " +
+                        "on the backend. Deleting them here frees space on the phone and cannot be " +
+                        "undone. Recording metadata stays."
+                } else {
+                    "${request.reason} Deleting now destroys the only copy of $night " +
+                        "(${session.chunks.size} chunks, ${formatBytes(bytes)}) and the recording " +
+                        "cannot be recovered. Upload it first unless you are sure you do not want it."
+                },
                 color = Muted,
                 fontSize = 13.sp,
             )
         },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("DELETE", color = Amber) } },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(if (request.verified) "DELETE" else "DELETE ANYWAY", color = Amber)
+            }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("KEEP", color = Cyan) } },
     )
 }
@@ -424,6 +476,7 @@ private fun uploadFieldColors() = OutlinedTextFieldDefaults.colors(
 private fun SessionRow(
     session: SessionManifest,
     localBytes: Long,
+    progressPercent: Int?,
     onUpload: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -440,9 +493,26 @@ private fun SessionRow(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
             )
+            if (progressPercent != null) {
+                LinearProgressIndicator(
+                    progress = { progressPercent / 100f },
+                    color = Cyan,
+                    trackColor = Line,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                Text(
+                    "uploading · $progressPercent% · you can lock the screen",
+                    color = Cyan,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             session.error?.let { Text(it, color = Amber, fontSize = 11.sp) }
         }
-        if (session.status != "recording" && !session.audioDeleted) {
+        if (progressPercent != null) {
+            // upload in flight: no actions until it settles
+        } else if (session.status != "recording" && !session.audioDeleted) {
             if (session.status != "uploaded") {
                 Button(onClick = onUpload, colors = ButtonDefaults.buttonColors(containerColor = Line)) { Text("UPLOAD") }
                 Spacer(Modifier.width(8.dp))

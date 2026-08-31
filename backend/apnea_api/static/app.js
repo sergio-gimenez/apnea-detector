@@ -9,7 +9,39 @@ const duration = (seconds) => {
   const s = Math.floor(seconds % 60);
   return h ? `${h}h ${m}m` : `${m}m ${s}s`;
 };
-const clock = (seconds) => new Date(currentSession.started_at_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit', timeZone:'UTC'}) + ` +${duration(seconds)}`;
+
+/* ---------- wall-clock time ----------
+   start_offset_seconds counts from currentSession.started_at_utc, which the phone
+   writes with Instant.now(): a real UTC instant, unaffected by whatever timezone
+   the phone's clock is set to. So a clip's wall-clock time is just that UTC
+   instant shown in `zone` — the reviewer's own timezone by default, and
+   overridable (the TZ button) for when that guess is wrong. */
+const TZ_KEY = 'apnea-review-tz';
+let zone = 'UTC';
+try {
+  zone = localStorage.getItem(TZ_KEY) || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+} catch { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
+
+const shortZone = () => {
+  try {
+    const part = new Intl.DateTimeFormat('en-GB', {timeZone: zone, timeZoneName: 'shortOffset'})
+      .formatToParts(new Date()).find(item => item.type === 'timeZoneName');
+    return part ? part.value.replace('GMT', 'UTC') : zone;
+  } catch { return zone; }
+};
+const zoneLabel = () => `${zone} (${shortZone()})`;
+const atOffset = (seconds) => new Date(Date.parse(currentSession.started_at_utc) + seconds * 1000);
+const wallTime = (date, withSeconds = true) => date.toLocaleTimeString('en-GB',
+  {hour: '2-digit', minute: '2-digit', ...(withSeconds ? {second: '2-digit'} : {}), timeZone: zone});
+const wallDay = (date) => date.toLocaleDateString('en-GB',
+  {weekday: 'short', day: '2-digit', month: 'short', timeZone: zone});
+// only worth showing a date once a clip crosses into a different calendar day
+const dayPrefix = (date) => wallDay(date) === wallDay(atOffset(0)) ? '' : `${wallDay(date)} `;
+const clockRange = (start, span) => {
+  const from = atOffset(start), to = atOffset(start + span);
+  return `${dayPrefix(from)}${wallTime(from)} – ${wallTime(to)}`;
+};
+const clock = (seconds) => `${dayPrefix(atOffset(seconds))}${wallTime(atOffset(seconds))} (+${duration(seconds)})`;
 let apiToken = sessionStorage.getItem('apnea-api-token') || '';
 const api = async (url, options = {}, retried = false) => {
   options.headers = {...(options.headers || {}), ...(apiToken ? {Authorization:`Bearer ${apiToken}`} : {})};
@@ -40,7 +72,8 @@ async function openSession(id) {
   const [summary, signals] = await Promise.all([api(`/api/sessions/${id}/summary`), api(`/api/sessions/${id}/signals`)]);
   $('#session-list').classList.add('hidden');
   $('#review').classList.remove('hidden');
-  $('#session-date').textContent = `${new Date(currentSession.started_at_utc).toLocaleString()} / ${currentSession.id.slice(0,8)}`;
+  $('#session-date').textContent = `${new Date(currentSession.started_at_utc).toLocaleString('en-GB', {timeZone: zone})} · ${zoneLabel()} · ${currentSession.id.slice(0,8)}`;
+  $('#tz').textContent = `🕓 ${shortZone()}`;
   const oximetry = summary.oximetry || {};
   const arch = summary.sleep_architecture;
   $('#algorithm').textContent = summary.algorithm_version || '';
@@ -72,7 +105,7 @@ async function openSession(id) {
 function renderEvents() {
   $('#events').innerHTML = currentEvents.length ? currentEvents.map(event => `
     <div class="event" data-id="${event.id}">
-      <b>+${duration(event.start_offset_seconds)}</b>
+      <b title="+${duration(event.start_offset_seconds)} into the night">${wallTime(atOffset(event.start_offset_seconds), false)}</b>
       <span>${event.duration_seconds.toFixed(0)} sec</span>
       <div><div class="confidence"><i style="width:${event.confidence*100}%"></i></div><small>${Math.round(event.confidence*100)}% confidence</small></div>
       <span class="tag">${event.review_status}</span>
@@ -87,7 +120,7 @@ async function selectEvent(id) {
     <p class="eyebrow">SUSPECTED RESPIRATORY EVENT</p><h2>${clock(event.start_offset_seconds)}</h2>
     <div class="evidence-list">${evidence}</div>
     <audio id="event-audio" controls preload="none"></audio>
-    <p class="hint">30 seconds before and after candidate.</p>
+    <p class="hint">Candidate window ${clockRange(event.start_offset_seconds, event.duration_seconds)} · ${zoneLabel()}. Audio includes 30 s before and after.</p>
     <div class="review-buttons">${['confirmed','rejected','uncertain'].map(status => `<button data-review="${status}">${status}</button>`).join('')}</div>`;
   document.querySelectorAll('[data-review]').forEach(button => button.onclick = async () => {
     const updated = await api(`/api/events/${event.id}/review`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:button.dataset.review})});
@@ -111,7 +144,7 @@ function drawTimeline(signals, events, desaturations = []) {
   const total = Math.max(currentSession.duration_seconds, 1);
   const groups = {audio_energy:[], spo2:[], heart_rate:[], respiration_rate:[], snore_rate:[]};
   signals.forEach(point => { if (groups[point.signal_type]) groups[point.signal_type].push([(new Date(point.timestamp_utc).getTime()-start)/1000, point.value]); });
-  for (let i=0;i<=8;i++) { const x=45+(width-65)*i/8; ctx.strokeStyle='#1f2930';ctx.beginPath();ctx.moveTo(x,20);ctx.lineTo(x,height-30);ctx.stroke();ctx.fillStyle='#65727b';ctx.fillText(duration(total*i/8),x-12,height-10); }
+  for (let i=0;i<=8;i++) { const x=45+(width-65)*i/8; ctx.strokeStyle='#1f2930';ctx.beginPath();ctx.moveTo(x,20);ctx.lineTo(x,height-30);ctx.stroke();ctx.fillStyle='#65727b';ctx.fillText(wallTime(atOffset(total*i/8),false),x-14,height-10); }
   desaturations.forEach(event => { const x=45+(width-65)*event.start_offset_seconds/total; const w=Math.max(2,(width-65)*event.duration_seconds/total);ctx.fillStyle='rgba(240,173,78,.16)';ctx.fillRect(x,20,w,115); });
   events.forEach(event => { const x=45+(width-65)*event.start_offset_seconds/total; const w=Math.max(3,(width-65)*event.duration_seconds/total);ctx.fillStyle='rgba(171,128,255,.22)';ctx.fillRect(x,20,w,height-50); });
   const draw = (points,color,min,max,top,bottom) => { if (!points.length) return;ctx.strokeStyle=color;ctx.lineWidth=1.4;ctx.beginPath();points.forEach(([time,value],i)=>{const x=45+(width-65)*time/total;const y=top+(bottom-top)*(1-(value-min)/(max-min));i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke(); };
@@ -171,8 +204,8 @@ async function renderClip() {
   }
   const item = batch[batchIndex];
   $('#label-buttons').classList.remove('hidden');
-  $('#label-progress').textContent = `Clip ${batchIndex + 1} of ${batch.length}`;
-  $('#label-help').textContent = 'Listen to the whole clip. Was there a pause in breathing or snoring? You are not told whether the detector flagged this one.';
+  $('#label-progress').textContent = `Clip ${batchIndex + 1} of ${batch.length} · ${wallTime(atOffset(item.start_offset_seconds))}`;
+  $('#label-help').textContent = `This clip covers ${clockRange(item.start_offset_seconds, item.duration_seconds)} (${zoneLabel()}), plus 30 s of audio each side. Was there a pause in breathing or snoring? You are not told whether the detector flagged it.`;
   const audio = $('#label-audio');
   audio.src = await authedBlob(`/api/review-items/${item.id}/audio.wav`);
 }
@@ -207,16 +240,41 @@ async function reveal(item, label) {
   await renderStats();
 }
 
+let waveData = null;   // last waveform payload, so the playhead can redraw it
+let waveToken = 0;     // invalidates the animation loop of a previous clip
+
 function drawWaveform(data) {
+  waveData = data;
+  const token = ++waveToken;
+  renderWave();
+  const audio = $('#label-audio');
+  const follow = () => renderWave(audio.currentTime);
+  audio.ontimeupdate = audio.onseeked = audio.onpause = audio.onended = follow;
+  audio.onplay = () => {
+    const step = () => {
+      if (token !== waveToken || audio.paused || audio.ended) return;
+      renderWave(audio.currentTime);
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+}
+
+// playSeconds: position of the audio scrubber, in seconds from the clip start
+function renderWave(playSeconds = null) {
+  const data = waveData;
   const canvas = $('#label-wave');
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth, height = canvas.clientHeight;
+  if (!data || !width || !height) return;
   canvas.width = width * ratio; canvas.height = height * ratio;
   const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, width, height);
   const t0 = data.start_offset_seconds, t1 = data.end_offset_seconds;
   const span = Math.max(t1 - t0, 0.001);
+  // clip seconds (0 = start of the audio) map straight onto session offset t0 + s
   const x = (seconds) => 8 + (width - 16) * (seconds - t0) / span;
+  const clipX = (clipSeconds) => x(t0 + clipSeconds);
   const values = data.envelope_dbfs.filter(Number.isFinite);
   const low = Math.min(...values, ...data.floor_dbfs) - 2;
   const high = Math.max(...values) + 4;
@@ -257,9 +315,29 @@ function drawWaveform(data) {
     ctx.fillStyle = '#f0ad4e'; ctx.font = '10px DM Mono';
     ctx.fillText(`SpO₂ ${Math.min(...data.spo2.map(p => p.value))}–${Math.max(...data.spo2.map(p => p.value))}%`, width - 108, 14);
   }
-  ctx.fillStyle = '#65727b'; ctx.font = '10px DM Mono';
-  ctx.fillText('0s', x(t0) - 4, height - 8);
-  ctx.fillText(`${Math.round(span)}s`, x(t1) - 18, height - 8);
+  // second axis: a tick every 5 / 10 / 15 s depending on how long the clip is
+  const stepSeconds = span > 60 ? 15 : span > 24 ? 10 : 5;
+  ctx.font = '10px DM Mono'; ctx.textAlign = 'left';
+  for (let sec = 0; sec <= span + 0.001; sec += stepSeconds) {
+    const px = clipX(sec);
+    ctx.strokeStyle = '#1b242a'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px, 10); ctx.lineTo(px, height - 26); ctx.stroke();
+    ctx.fillStyle = '#65727b';
+    ctx.fillText(`${sec}s`, Math.min(px + 3, width - 22), height - 8);
+  }
+
+  // where the window in question sits, in clip seconds
+  ctx.fillStyle = '#b79bff';
+  ctx.fillText(`window ${(ws - t0).toFixed(1)}–${(we - t0).toFixed(1)}s`, Math.min(x(ws) + 4, width - 150), 20);
+
+  // playhead: follows the audio scrubber
+  if (playSeconds != null && isFinite(playSeconds)) {
+    const px = clipX(Math.max(0, Math.min(playSeconds, span)));
+    ctx.strokeStyle = '#e9edf0'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(px, 8); ctx.lineTo(px, height - 26); ctx.stroke();
+    ctx.fillStyle = '#e9edf0';
+    ctx.fillText(`${playSeconds.toFixed(1)}s`, Math.min(px + 4, width - 32), 32);
+  }
 }
 
 async function renderStats() {
@@ -284,5 +362,18 @@ $('#label').onclick = () => openLabeling(false);
 $('#label-new').onclick = () => openLabeling(true);
 $('#label-exit').onclick = () => { $('#labeling').classList.add('hidden'); $('#label-audio').removeAttribute('src'); };
 
-window.addEventListener('resize', () => currentSession && openSession(currentSession.id));
+$('#tz').textContent = `🕓 ${shortZone()}`;
+$('#tz').onclick = () => {
+  const next = (prompt('Timezone for every clip time (IANA name, e.g. Europe/Madrid, or UTC)', zone) || '').trim();
+  if (!next || next === zone) return;
+  try {
+    new Intl.DateTimeFormat('en-GB', {timeZone: next}); // throws on an unknown zone
+    zone = next;
+    try { localStorage.setItem(TZ_KEY, zone); } catch {}
+    announce(`Clip times now shown in ${zoneLabel()}.`);
+    if (currentSession) openSession(currentSession.id); else $('#tz').textContent = `🕓 ${shortZone()}`;
+  } catch { announce(`Unknown timezone: ${next}`); }
+};
+
+window.addEventListener('resize', () => { if (currentSession) openSession(currentSession.id); renderWave(); });
 loadSessions().catch(error => announce(error.message));

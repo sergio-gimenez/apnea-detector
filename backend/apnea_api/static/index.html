@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=6">
+    <link rel="stylesheet" href="/styles.css?v=8">
   </head>
   <body>
     <header>
@@ -27,6 +27,7 @@
             <h1>Night review</h1>
           </div>
           <div class="actions">
+            <button id="tz" class="ghost" title="Timezone used for every clip time on this page">🕓 TZ</button>
             <button id="garmin">Pull Garmin</button>
             <button id="reanalyze">Run analysis</button>
             <button id="label">Label night ▸</button>
@@ -65,7 +66,7 @@
           <div id="label-reveal" class="hidden">
             <div id="label-verdict"></div>
             <canvas id="label-wave" height="200"></canvas>
-            <p class="hint">Cyan: loudness envelope. Grey: local floor. Dashed: snore-burst threshold. Purple: detected bursts. Shaded: the window in question. Amber: SpO₂.</p>
+            <p class="hint">Cyan: loudness envelope. Grey: local floor. Dashed: snore-burst threshold. Purple: detected bursts. Shaded: the window in question. Amber: SpO₂. Ticks mark clip seconds; the white marker follows the audio as it plays.</p>
             <button id="label-next">NEXT CLIP →</button>
           </div>
           <div id="label-stats" class="stats"></div>
@@ -83,6 +84,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=6"></script>
+    <script src="/app.js?v=8"></script>
   </body>
 </html>

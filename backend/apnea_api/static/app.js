@@ -132,22 +132,31 @@ const authedBlob = async (url) => {
 };
 
 async function openLabeling(fresh) {
+  // the panel always opens: a button that silently does nothing reads as broken
+  $('#labeling').classList.remove('hidden');
+  $('#labeling').scrollIntoView({behavior:'smooth', block:'start'});
   try {
-    if (fresh) {
+    batch = fresh ? [] : await api(`/api/sessions/${currentSession.id}/review-batch`);
+    if (!batch.length) {
+      $('#label-progress').textContent = 'Preparing clips…';
+      $('#label-buttons').classList.add('hidden');
       announce('Building a blinded batch…');
       const made = await api(`/api/sessions/${currentSession.id}/review-batch`, {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({control_ratio: 1.0}),
       });
-      announce(`${made.items} clips queued (${made.candidate} candidates + ${made.control} controls, shuffled).`);
+      announce(`${made.items} clips queued: ${made.candidate} candidates and ${made.control} controls, shuffled.`);
+      batch = await api(`/api/sessions/${currentSession.id}/review-batch`);
     }
-    batch = await api(`/api/sessions/${currentSession.id}/review-batch`);
-    if (!batch.length) { announce('No batch yet. Use “New batch”.'); return; }
-    $('#labeling').classList.remove('hidden');
     batchIndex = batch.findIndex(item => !item.labeled);
     if (batchIndex < 0) batchIndex = batch.length;
     await renderClip();
-  } catch (error) { announce(error.message); }
+  } catch (error) {
+    $('#label-progress').textContent = 'Could not start labelling';
+    $('#label-help').textContent = error.message;
+    $('#label-buttons').classList.add('hidden');
+    announce(error.message);
+  }
 }
 
 async function renderClip() {

@@ -61,3 +61,12 @@ class GarminImportRequest(BaseModel):
         if value is not None:
             datetime.strptime(value, "%Y-%m-%d")
         return value
+
+
+class ReviewBatchRequest(BaseModel):
+    control_ratio: float = Field(default=1.0, ge=0.0, le=3.0)
+    seed: int | None = None
+
+
+class LabelUpdate(BaseModel):
+    label: Literal["pause", "no_pause", "unclear"]

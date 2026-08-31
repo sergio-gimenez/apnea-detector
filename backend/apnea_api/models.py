@@ -41,6 +41,9 @@ class SleepSession(Base):
     architecture: Mapped[SleepArchitecture | None] = relationship(
         back_populates="session", cascade="all, delete-orphan", uselist=False
     )
+    review_items: Mapped[list[ReviewItem]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class AudioChunk(Base):
@@ -122,3 +125,32 @@ class SleepArchitecture(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     session: Mapped[SleepSession] = relationship(back_populates="architecture")
+
+
+class ReviewItem(Base):
+    """One blinded clip in a labelling batch.
+
+    Labelling only the detector's own candidates measures precision but can never
+    reveal missed events, and showing which clips are candidates invites the
+    listener to agree with the detector. So a batch mixes candidates with control
+    windows drawn from the same snoring periods, stores them in a shuffled order,
+    and withholds `kind` until a label has been recorded.
+    """
+
+    __tablename__ = "review_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sleep_sessions.id", ondelete="CASCADE"))
+    batch: Mapped[str] = mapped_column(String(36), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(20))  # candidate | control
+    event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("respiratory_events.id", ondelete="SET NULL"), nullable=True
+    )
+    start_offset_seconds: Mapped[float] = mapped_column(Float)
+    duration_seconds: Mapped[float] = mapped_column(Float)
+    label: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    labeled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    session: Mapped[SleepSession] = relationship(back_populates="review_items")

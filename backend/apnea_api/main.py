@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import io
 import json
 import os
@@ -10,11 +11,12 @@ import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import create_engine, delete, event, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .analysis import (
@@ -26,16 +28,35 @@ from .analysis import (
 )
 from .garmin import import_for_session
 from .oximetry import OximetryResult, analyze_oximetry
+from .review import plan_batch, score_batch
+from .snoring import (
+    BURST_THRESHOLD_DB,
+    ENVELOPE_HZ,
+    EPOCH_SECONDS,
+    band_envelope,
+    detect_bursts,
+    keep_loud_bursts,
+    rolling_floor,
+    to_dbfs,
+)
 from .models import (
     AudioChunk,
     Base,
     RespiratoryEvent,
     SignalPoint,
+    ReviewItem,
     SleepArchitecture,
     SleepSession,
     utc_now,
 )
-from .schemas import GarminImportRequest, ReviewUpdate, SessionCreate, SignalBatch
+from .schemas import (
+    GarminImportRequest,
+    LabelUpdate,
+    ReviewBatchRequest,
+    ReviewUpdate,
+    SessionCreate,
+    SignalBatch,
+)
 
 
 def add_missing_columns(engine) -> None:
@@ -392,11 +413,19 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         session = get_session_or_404(event.session_id, db)
         if not (0 <= before <= 120 and 0 <= after <= 120):
             raise HTTPException(422, "before and after must each be between 0 and 120 seconds")
-        rate = session.sample_rate
-        first_sample = max(0, int((event.start_offset_seconds - max(0, before)) * rate))
-        last_sample = int(
-            (event.start_offset_seconds + event.duration_seconds + max(0, after)) * rate
+        return clip_response(
+            session,
+            event.start_offset_seconds - max(0, before),
+            event.start_offset_seconds + event.duration_seconds + max(0, after),
+            db,
         )
+
+    def clip_response(
+        session: SleepSession, start_seconds: float, end_seconds: float, db: Session
+    ) -> StreamingResponse:
+        rate = session.sample_rate
+        first_sample = max(0, int(start_seconds * rate))
+        last_sample = int(end_seconds * rate)
         all_chunks = list(
             db.scalars(
                 select(AudioChunk)
@@ -459,6 +488,226 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
     def get_oximetry(session_id: str, db: Session = Depends(get_db)) -> dict:
         session = get_session_or_404(session_id, db)
         return session_oximetry(session, db).as_json()
+
+    def snoring_mask_for(session: SleepSession, db: Session) -> np.ndarray:
+        """Rebuild the per-epoch snoring flag from the stored snore_rate series.
+
+        Analysis writes one snore_rate point per snoring epoch, so the mask can be
+        recovered without re-reading a whole night of audio.
+        """
+        duration = session_elapsed_seconds(session, session.chunks)
+        epochs = max(1, math.ceil(duration / EPOCH_SECONDS))
+        mask = np.zeros(epochs, dtype=bool)
+        started_at = _as_utc(session.started_at_utc)
+        rows = db.scalars(
+            select(SignalPoint).where(
+                SignalPoint.session_id == session.id,
+                SignalPoint.signal_type == "snore_rate",
+            )
+        )
+        for row in rows:
+            index = int((_as_utc(row.timestamp_utc) - started_at).total_seconds() // EPOCH_SECONDS)
+            if 0 <= index < epochs:
+                mask[index] = True
+        return mask
+
+    def read_window(session: SleepSession, start_seconds: float, end_seconds: float, db: Session):
+        rate = session.sample_rate
+        first_sample = max(0, int(start_seconds * rate))
+        last_sample = int(end_seconds * rate)
+        samples = np.zeros(max(0, last_sample - first_sample), dtype=np.int16)
+        for chunk in db.scalars(
+            select(AudioChunk).where(AudioChunk.session_id == session.id)
+        ):
+            offset = chunk_timeline_sample_offset(session, chunk)
+            if offset >= last_sample or offset + chunk.sample_count <= first_sample:
+                continue
+            overlap_start = max(first_sample, offset)
+            overlap_end = min(last_sample, offset + chunk.sample_count)
+            with wave.open(str(root / chunk.filename), "rb") as source:
+                source.setpos(overlap_start - offset)
+                data = np.frombuffer(
+                    source.readframes(overlap_end - overlap_start), dtype="<i2"
+                )
+            samples[overlap_start - first_sample : overlap_start - first_sample + data.size] = data
+        return samples
+
+    def waveform_for(
+        session: SleepSession,
+        start_seconds: float,
+        end_seconds: float,
+        window_start: float,
+        window_end: float,
+        db: Session,
+    ) -> dict:
+        start_seconds = max(0.0, start_seconds)
+        samples = read_window(session, start_seconds, end_seconds, db)
+        envelope_db = to_dbfs(band_envelope(samples, session.sample_rate))
+        floor_db = rolling_floor(envelope_db)
+        bursts = keep_loud_bursts(detect_bursts(envelope_db, floor_db))
+        started_at = _as_utc(session.started_at_utc)
+        spo2 = [
+            {
+                "offset": (_as_utc(row.timestamp_utc) - started_at).total_seconds(),
+                "value": row.value,
+            }
+            for row in db.scalars(
+                select(SignalPoint)
+                .where(
+                    SignalPoint.session_id == session.id,
+                    SignalPoint.signal_type == "spo2",
+                    SignalPoint.timestamp_utc
+                    >= started_at + timedelta(seconds=start_seconds - 120),
+                    SignalPoint.timestamp_utc
+                    <= started_at + timedelta(seconds=end_seconds + 180),
+                )
+                .order_by(SignalPoint.timestamp_utc)
+            )
+        ]
+        return {
+            "start_offset_seconds": round(start_seconds, 2),
+            "end_offset_seconds": round(end_seconds, 2),
+            "window": [round(window_start, 2), round(window_end, 2)],
+            "sample_rate_hz": ENVELOPE_HZ,
+            "envelope_dbfs": [round(float(value), 1) for value in envelope_db],
+            "floor_dbfs": [round(float(value), 1) for value in floor_db],
+            "burst_threshold_db": BURST_THRESHOLD_DB,
+            "bursts": [
+                {
+                    "start": round(start_seconds + burst.start, 2),
+                    "duration": round(burst.duration, 2),
+                    "peak_dbfs": round(burst.peak_dbfs, 1),
+                }
+                for burst in bursts
+            ],
+            "spo2": spo2,
+        }
+
+    def review_item_or_404(item_id: int, db: Session) -> ReviewItem:
+        item = db.get(ReviewItem, item_id)
+        if not item:
+            raise HTTPException(404, "Review item not found")
+        return item
+
+    def item_json(item: ReviewItem, reveal: bool, db: Session) -> dict:
+        payload = {
+            "id": item.id,
+            "position": item.position,
+            "batch": item.batch,
+            "session_id": item.session_id,
+            "start_offset_seconds": item.start_offset_seconds,
+            "duration_seconds": item.duration_seconds,
+            "label": item.label,
+            "labeled": item.label is not None,
+        }
+        # `kind` is what makes the batch blinded, so it is withheld until a label exists
+        if reveal or item.label is not None:
+            payload["kind"] = item.kind
+            event = db.get(RespiratoryEvent, item.event_id) if item.event_id else None
+            payload["event"] = _event_json(event) if event else None
+        return payload
+
+    @app.post("/api/sessions/{session_id}/review-batch")
+    def create_review_batch(
+        session_id: str,
+        payload: ReviewBatchRequest | None = None,
+        db: Session = Depends(get_db),
+    ) -> dict:
+        session = get_session_or_404(session_id, db)
+        request = payload or ReviewBatchRequest()
+        events = list(
+            db.scalars(
+                select(RespiratoryEvent)
+                .where(RespiratoryEvent.session_id == session_id)
+                .order_by(RespiratoryEvent.start_offset_seconds)
+            )
+        )
+        if not events:
+            raise HTTPException(422, "Run analysis before building a review batch")
+        mask = snoring_mask_for(session, db)
+        batch, planned = plan_batch(
+            [(e.id, e.start_offset_seconds, e.duration_seconds) for e in events],
+            mask,
+            EPOCH_SECONDS,
+            control_ratio=request.control_ratio,
+            seed=request.seed,
+        )
+        db.execute(delete(ReviewItem).where(ReviewItem.session_id == session_id))
+        for position, item in enumerate(planned):
+            db.add(
+                ReviewItem(
+                    session_id=session_id,
+                    batch=batch,
+                    position=position,
+                    kind=item.kind,
+                    event_id=item.event_id,
+                    start_offset_seconds=item.start_offset_seconds,
+                    duration_seconds=item.duration_seconds,
+                )
+            )
+        db.commit()
+        counts = {"candidate": 0, "control": 0}
+        for item in planned:
+            counts[item.kind] += 1
+        return {"batch": batch, "items": len(planned), **counts}
+
+    @app.get("/api/sessions/{session_id}/review-batch")
+    def get_review_batch(session_id: str, db: Session = Depends(get_db)) -> list[dict]:
+        get_session_or_404(session_id, db)
+        items = db.scalars(
+            select(ReviewItem)
+            .where(ReviewItem.session_id == session_id)
+            .order_by(ReviewItem.position)
+        )
+        return [item_json(item, reveal=False, db=db) for item in items]
+
+    @app.patch("/api/review-items/{item_id}")
+    def label_review_item(
+        item_id: int, payload: LabelUpdate, db: Session = Depends(get_db)
+    ) -> dict:
+        item = review_item_or_404(item_id, db)
+        item.label = payload.label
+        item.labeled_at = utc_now()
+        db.commit()
+        return item_json(item, reveal=True, db=db)
+
+    @app.get("/api/review-items/{item_id}/audio.wav")
+    def review_item_audio(
+        item_id: int, before: float = 30, after: float = 30, db: Session = Depends(get_db)
+    ) -> StreamingResponse:
+        item = review_item_or_404(item_id, db)
+        session = get_session_or_404(item.session_id, db)
+        if not (0 <= before <= 120 and 0 <= after <= 120):
+            raise HTTPException(422, "before and after must each be between 0 and 120 seconds")
+        return clip_response(
+            session,
+            item.start_offset_seconds - max(0, before),
+            item.start_offset_seconds + item.duration_seconds + max(0, after),
+            db,
+        )
+
+    @app.get("/api/review-items/{item_id}/waveform")
+    def review_item_waveform(
+        item_id: int, before: float = 30, after: float = 30, db: Session = Depends(get_db)
+    ) -> dict:
+        item = review_item_or_404(item_id, db)
+        session = get_session_or_404(item.session_id, db)
+        return waveform_for(
+            session,
+            item.start_offset_seconds - max(0, before),
+            item.start_offset_seconds + item.duration_seconds + max(0, after),
+            item.start_offset_seconds,
+            item.start_offset_seconds + item.duration_seconds,
+            db,
+        )
+
+    @app.get("/api/sessions/{session_id}/review-stats")
+    def review_stats(session_id: str, db: Session = Depends(get_db)) -> dict:
+        get_session_or_404(session_id, db)
+        rows = db.execute(
+            select(ReviewItem.kind, ReviewItem.label).where(ReviewItem.session_id == session_id)
+        ).all()
+        return score_batch([(kind, label) for kind, label in rows])
 
     @app.get("/api/sessions/{session_id}/summary")
     def summary(session_id: str, db: Session = Depends(get_db)) -> dict:

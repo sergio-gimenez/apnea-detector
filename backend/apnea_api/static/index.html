@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=4">
+    <link rel="stylesheet" href="/styles.css?v=5">
   </head>
   <body>
     <header>
@@ -29,7 +29,7 @@
           <div class="actions">
             <button id="garmin">Pull Garmin</button>
             <button id="reanalyze">Run analysis</button>
-            <button id="reanalyze-legacy" class="ghost">Compare v0.1</button>
+            <button id="label">Label night</button>
           </div>
         </div>
         <div id="notice"></div>
@@ -44,6 +44,33 @@
           <canvas id="timeline" height="330"></canvas>
           <p class="hint">Purple bars mark snore-gap candidates; amber bands mark wearable SpO₂ desaturations (minute-level, supporting evidence only). Click event below for evidence and audio.</p>
         </section>
+        <section id="labeling" class="panel hidden">
+          <div class="label-head">
+            <div>
+              <p class="eyebrow">BLINDED LABELLING</p>
+              <h2 id="label-progress">Clip</h2>
+            </div>
+            <div class="actions">
+              <button id="label-new" class="ghost">New batch</button>
+              <button id="label-exit" class="ghost">Close</button>
+            </div>
+          </div>
+          <p class="hint" id="label-help">Listen to the whole clip. Was there a pause in breathing or snoring? You are not told whether the detector flagged this one.</p>
+          <audio id="label-audio" controls preload="auto"></audio>
+          <div id="label-buttons" class="label-buttons">
+            <button data-label="pause">PAUSE PRESENT</button>
+            <button data-label="no_pause">NO PAUSE</button>
+            <button data-label="unclear">UNCLEAR</button>
+          </div>
+          <div id="label-reveal" class="hidden">
+            <div id="label-verdict"></div>
+            <canvas id="label-wave" height="200"></canvas>
+            <p class="hint">Cyan: loudness envelope. Grey: local floor. Dashed: snore-burst threshold. Purple: detected bursts. Shaded: the window in question. Amber: SpO₂.</p>
+            <button id="label-next">NEXT CLIP →</button>
+          </div>
+          <div id="label-stats" class="stats"></div>
+        </section>
+
         <section class="review-grid">
           <div class="panel">
             <p class="eyebrow">CANDIDATE QUEUE</p>
@@ -56,6 +83,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=4"></script>
+    <script src="/app.js?v=5"></script>
   </body>
 </html>

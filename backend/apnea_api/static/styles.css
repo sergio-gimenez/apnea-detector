@@ -29,3 +29,21 @@ button { font:600 13px Arial,sans-serif; border:1px solid #3b4a54; background:#1
 .arch b { display:block;font:500 22px 'DM Mono';color:var(--ink); }
 .arch span { color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em; }
 button.ghost { background:transparent;color:var(--muted); }
+
+.label-head { display:flex;justify-content:space-between;align-items:start;margin-bottom:10px; }
+.label-buttons { display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0; }
+.label-buttons button { padding:16px 8px;font-weight:700; }
+.label-buttons button[data-label="pause"] { border-color:#5b4a7a; }
+#label-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px; }
+#label-verdict { display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px;font:12px 'DM Mono'; }
+#label-verdict .badge { padding:5px 10px;border:1px solid var(--line); }
+#label-verdict .candidate { color:var(--purple);border-color:var(--purple); }
+#label-verdict .control { color:var(--muted); }
+#label-verdict .agree { color:var(--green);border-color:var(--green); }
+#label-verdict .disagree { color:var(--amber);border-color:var(--amber); }
+#label-next { margin-top:14px; }
+.stats { display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-top:20px; }
+.stats:empty { display:none; }
+.stats div { background:var(--panel);padding:16px; }
+.stats b { display:block;font:500 24px 'DM Mono'; }
+.stats span { color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em; }

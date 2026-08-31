@@ -121,7 +121,159 @@ function drawTimeline(signals, events, desaturations = []) {
 $('#back').onclick = () => { $('#review').classList.add('hidden');$('#session-list').classList.remove('hidden');announce();loadSessions(); };
 const runAnalysis = async (algorithm) => { try { announce(`Running ${algorithm} over the night…`);const result=await api(`/api/sessions/${currentSession.id}/analyze?algorithm=${encodeURIComponent(algorithm)}`,{method:'POST'});announce(`${result.algorithm_version}: ${result.events} candidates.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };
 $('#reanalyze').onclick = () => runAnalysis('dsp-v0.2.0');
-$('#reanalyze-legacy').onclick = () => runAnalysis('dsp-v0.1.0');
 $('#garmin').onclick = async () => { try { announce('Fetching Garmin sleep and health signals…');const result=await api(`/api/sessions/${currentSession.id}/garmin/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});announce(`Imported ${result.imported} Garmin points. Re-run analysis to fuse them.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };
+/* ---------- blinded labelling ---------- */
+let batch = [], batchIndex = 0;
+
+const authedBlob = async (url) => {
+  const response = await fetch(url, {headers: apiToken ? {Authorization:`Bearer ${apiToken}`} : {}});
+  if (!response.ok) throw new Error(`Clip unavailable (${response.status})`);
+  return URL.createObjectURL(await response.blob());
+};
+
+async function openLabeling(fresh) {
+  try {
+    if (fresh) {
+      announce('Building a blinded batch…');
+      const made = await api(`/api/sessions/${currentSession.id}/review-batch`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({control_ratio: 1.0}),
+      });
+      announce(`${made.items} clips queued (${made.candidate} candidates + ${made.control} controls, shuffled).`);
+    }
+    batch = await api(`/api/sessions/${currentSession.id}/review-batch`);
+    if (!batch.length) { announce('No batch yet. Use “New batch”.'); return; }
+    $('#labeling').classList.remove('hidden');
+    batchIndex = batch.findIndex(item => !item.labeled);
+    if (batchIndex < 0) batchIndex = batch.length;
+    await renderClip();
+  } catch (error) { announce(error.message); }
+}
+
+async function renderClip() {
+  await renderStats();
+  $('#label-reveal').classList.add('hidden');
+  if (batchIndex >= batch.length) {
+    $('#label-progress').textContent = 'All clips labelled';
+    $('#label-help').textContent = 'Every clip in this batch has a label. The numbers below are the result.';
+    $('#label-buttons').classList.add('hidden');
+    $('#label-audio').removeAttribute('src');
+    return;
+  }
+  const item = batch[batchIndex];
+  $('#label-buttons').classList.remove('hidden');
+  $('#label-progress').textContent = `Clip ${batchIndex + 1} of ${batch.length}`;
+  $('#label-help').textContent = 'Listen to the whole clip. Was there a pause in breathing or snoring? You are not told whether the detector flagged this one.';
+  const audio = $('#label-audio');
+  audio.src = await authedBlob(`/api/review-items/${item.id}/audio.wav`);
+}
+
+async function labelClip(label) {
+  const item = batch[batchIndex];
+  try {
+    const revealed = await api(`/api/review-items/${item.id}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({label}),
+    });
+    batch[batchIndex] = {...item, ...revealed, labeled:true};
+    await reveal(batch[batchIndex], label);
+  } catch (error) { announce(error.message); }
+}
+
+async function reveal(item, label) {
+  const wasFlagged = item.kind === 'candidate';
+  const heardPause = label === 'pause';
+  const agrees = label !== 'unclear' && wasFlagged === heardPause;
+  $('#label-verdict').innerHTML = `
+    <span class="badge ${wasFlagged ? 'candidate' : 'control'}">${wasFlagged ? 'DETECTOR FLAGGED THIS' : 'CONTROL WINDOW'}</span>
+    <span class="badge">you said ${label.replace('_', ' ')}</span>
+    ${label === 'unclear' ? '' : `<span class="badge ${agrees ? 'agree' : 'disagree'}">${agrees ? 'agrees' : (wasFlagged ? 'false positive' : 'MISSED EVENT')}</span>`}
+    ${item.event ? `<span class="badge">confidence ${Math.round(item.event.confidence * 100)}%</span>` : ''}
+    ${item.event && item.event.evidence.recovery_gasp ? '<span class="badge">recovery gasp</span>' : ''}`;
+  $('#label-reveal').classList.remove('hidden');
+  $('#label-buttons').classList.add('hidden');
+  try {
+    drawWaveform(await api(`/api/review-items/${item.id}/waveform`));
+  } catch (error) { announce(error.message); }
+  await renderStats();
+}
+
+function drawWaveform(data) {
+  const canvas = $('#label-wave');
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  canvas.width = width * ratio; canvas.height = height * ratio;
+  const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
+  ctx.clearRect(0, 0, width, height);
+  const t0 = data.start_offset_seconds, t1 = data.end_offset_seconds;
+  const span = Math.max(t1 - t0, 0.001);
+  const x = (seconds) => 8 + (width - 16) * (seconds - t0) / span;
+  const values = data.envelope_dbfs.filter(Number.isFinite);
+  const low = Math.min(...values, ...data.floor_dbfs) - 2;
+  const high = Math.max(...values) + 4;
+  const y = (db) => 12 + (height - 40) * (1 - (db - low) / Math.max(high - low, 1));
+
+  const [ws, we] = data.window;
+  ctx.fillStyle = 'rgba(171,128,255,.14)';
+  ctx.fillRect(x(ws), 10, Math.max(2, x(we) - x(ws)), height - 34);
+
+  data.bursts.forEach(burst => {
+    ctx.fillStyle = 'rgba(171,128,255,.55)';
+    ctx.fillRect(x(burst.start), height - 26, Math.max(1.5, (width - 16) * burst.duration / span), 6);
+  });
+
+  const line = (series, color, dash = []) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.setLineDash(dash); ctx.beginPath();
+    series.forEach((value, index) => {
+      const px = x(t0 + index / data.sample_rate_hz);
+      const py = y(value);
+      index ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+  };
+  line(data.floor_dbfs, '#4a5860');
+  line(data.floor_dbfs.map(value => value + data.burst_threshold_db), '#6c7a84', [4, 4]);
+  line(data.envelope_dbfs, '#58d6d0');
+
+  if (data.spo2.length > 1) {
+    const lows = Math.min(...data.spo2.map(p => p.value)) - 1;
+    const highs = Math.max(...data.spo2.map(p => p.value)) + 1;
+    ctx.strokeStyle = '#f0ad4e'; ctx.lineWidth = 1.6; ctx.beginPath();
+    data.spo2.forEach((point, index) => {
+      const px = x(point.offset);
+      const py = 14 + (height - 46) * (1 - (point.value - lows) / Math.max(highs - lows, 1));
+      index ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+    ctx.stroke();
+    ctx.fillStyle = '#f0ad4e'; ctx.font = '10px DM Mono';
+    ctx.fillText(`SpO₂ ${Math.min(...data.spo2.map(p => p.value))}–${Math.max(...data.spo2.map(p => p.value))}%`, width - 108, 14);
+  }
+  ctx.fillStyle = '#65727b'; ctx.font = '10px DM Mono';
+  ctx.fillText('0s', x(t0) - 4, height - 8);
+  ctx.fillText(`${Math.round(span)}s`, x(t1) - 18, height - 8);
+}
+
+async function renderStats() {
+  const stats = await api(`/api/sessions/${currentSession.id}/review-stats`);
+  const done = stats.candidates.labeled + stats.controls.labeled;
+  const total = stats.candidates.total + stats.controls.total;
+  $('#label-stats').innerHTML = [
+    ['Labelled', `${done}/${total}`],
+    ['Precision', stats.precision == null ? '—' : `${Math.round(stats.precision * 100)}%`],
+    ['Recall (est.)', stats.recall_estimate == null ? '—' : `${Math.round(stats.recall_estimate * 100)}%`],
+    ['Pauses in controls', stats.control_pause_rate == null ? '—' : `${Math.round(stats.control_pause_rate * 100)}%`],
+    ['Missed events', stats.controls.pause],
+    ['False positives', stats.candidates.no_pause],
+  ].map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`).join('');
+}
+
+document.querySelectorAll('[data-label]').forEach(button => {
+  button.onclick = () => labelClip(button.dataset.label);
+});
+$('#label-next').onclick = () => { batchIndex += 1; renderClip(); };
+$('#label').onclick = () => openLabeling(false);
+$('#label-new').onclick = () => openLabeling(true);
+$('#label-exit').onclick = () => { $('#labeling').classList.add('hidden'); $('#label-audio').removeAttribute('src'); };
+
 window.addEventListener('resize', () => currentSession && openSession(currentSession.id));
 loadSessions().catch(error => announce(error.message));

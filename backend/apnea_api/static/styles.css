@@ -52,3 +52,27 @@ button.ghost { background:transparent;color:var(--muted); }
 .stats div { background:var(--panel);padding:16px; }
 .stats b { display:block;font:500 24px 'DM Mono'; }
 .stats span { color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em; }
+
+/* ---------- sign-in gate ---------- */
+#whoami { display:flex;align-items:center;gap:14px;font:11px 'DM Mono',monospace;color:var(--muted); }
+#whoami-name { color:var(--cyan); }
+#whoami button { padding:7px 12px;font-size:11px; }
+.auth-card { max-width:460px;margin:8vh auto; }
+.auth-step h1 { font-size:clamp(32px,5vw,44px);margin:0 0 14px; }
+.auth-step .lede { margin:0 0 24px;font-size:15px; }
+.auth-step label { display:block;font:11px 'DM Mono',monospace;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:16px; }
+.auth-step input { display:block;width:100%;margin-top:7px;padding:12px 14px;background:#0c1115;border:1px solid var(--line);color:var(--ink);font-size:15px; }
+.auth-step input:focus { outline:none;border-color:var(--cyan); }
+.auth-step > button { width:100%;padding:13px;margin-top:4px; }
+.auth-error:not(:empty) { margin:16px 0 0;padding:10px 14px;border-left:3px solid var(--amber);background:#2a2115;color:#f4d5a2;font-size:13px;white-space:pre-line; }
+.qr { display:inline-block;padding:10px;background:#fff;border-radius:4px;margin-bottom:14px; }
+.qr img { display:block;width:180px;height:180px; }
+#auth-secret { font-family:'DM Mono',monospace;color:var(--cyan);word-break:break-all; }
+.recovery-codes { list-style:none;padding:0;margin:0 0 22px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px; }
+.recovery-codes li { background:#0c1115;border:1px solid var(--line);padding:10px 12px;font-family:'DM Mono',monospace;letter-spacing:.06em; }
+
+/* ---------- security panel ---------- */
+#security-notice:not(:empty) { margin:0 0 18px;padding:12px 16px;border-left:3px solid var(--cyan);background:#12242a;color:#bfeceb;font-size:13px;white-space:pre-line;word-break:break-all; }
+.sec-row { display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-top:1px solid var(--line); }
+.sec-row small { display:block;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;margin-top:4px; }
+#token-new { margin-top:16px; }

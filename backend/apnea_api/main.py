@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import math
 import io
 import json
@@ -25,6 +24,12 @@ from .analysis import (
     analyze_session,
     chunk_timeline_sample_offset,
     session_elapsed_seconds,
+)
+from .auth import (
+    build_auth_router,
+    check_origin,
+    resolve_principal,
+    session_cookie_name,
 )
 from .garmin import import_for_session
 from .oximetry import OximetryResult, analyze_oximetry
@@ -144,30 +149,55 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
     add_missing_columns(engine)
 
     app = FastAPI(title="Apnea screening prototype", version="0.1.0")
-    api_token = os.getenv("APNEA_API_TOKEN")
     insecure_development = os.getenv("APNEA_ALLOW_INSECURE_DEV") == "1"
-    if not api_token and not insecure_development:
-        raise RuntimeError(
-            "APNEA_API_TOKEN is required; set APNEA_ALLOW_INSECURE_DEV=1 only for local development"
-        )
-    if api_token and len(api_token) < 32:
-        raise RuntimeError("APNEA_API_TOKEN must contain at least 32 characters")
+    secure_cookies = not insecure_development
+    session_cookie = session_cookie_name(secure_cookies)
+    trust_forwarded_for = os.getenv("APNEA_TRUST_FORWARDED_FOR") == "1"
+    trusted_origins = {
+        origin.strip().rstrip("/")
+        for origin in os.getenv("APNEA_TRUSTED_ORIGINS", "").split(",")
+        if origin.strip()
+    }
+    unsafe_methods = {"POST", "PUT", "PATCH", "DELETE"}
+    open_paths = {"/api/health"}
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):
-        if api_token and request.url.path.startswith("/api/") and request.url.path != "/api/health":
-            authorization = request.headers.get("Authorization", "")
-            supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
-            if not hmac.compare_digest(supplied, api_token):
-                return JSONResponse({"detail": "Valid bearer token required"}, status_code=401)
+        path = request.url.path
+        guarded = path.startswith("/api/") and path not in open_paths
+        # /api/auth/* is public at the edge and enforces its own rules per route.
+        is_auth_route = path == "/api/auth" or path.startswith("/api/auth/")
+
+        if guarded and not insecure_development:
+            bearer = request.headers.get("authorization", "").startswith("Bearer ")
+            if (
+                request.method in unsafe_methods
+                and not bearer
+                and not check_origin(request, trusted_origins)
+            ):
+                return JSONResponse({"detail": "Cross-origin request refused"}, status_code=403)
+            if not is_auth_route:
+                with database() as db:
+                    principal = resolve_principal(request, db, session_cookie)
+                if principal is None:
+                    return JSONResponse({"detail": "Authentication required"}, status_code=401)
+                if not principal.fully_authorized:
+                    return JSONResponse(
+                        {"detail": "MFA required", "needs_mfa": True}, status_code=403
+                    )
+
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-            "connect-src 'self'; media-src 'self' blob:; img-src 'self' data:"
+            "connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; "
+            "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         )
-        if request.url.path.startswith("/api/"):
+        response.headers["X-Frame-Options"] = "DENY"
+        if not insecure_development:
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        if path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -772,6 +802,16 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             "oximetry": oximetry,
             "disclaimer": "Screening metric only. SREI is not AHI and this is not a diagnosis.",
         }
+
+    app.include_router(
+        build_auth_router(
+            database,
+            secure_cookies=secure_cookies,
+            trusted_origins=trusted_origins,
+            insecure_dev=insecure_development,
+            trust_forwarded_for=trust_forwarded_for,
+        )
+    )
 
     static = Path(__file__).parent / "static"
     app.mount("/", StaticFiles(directory=static, html=True), name="dashboard")

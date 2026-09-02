@@ -6,7 +6,12 @@ services:
       - "8080:8080"
     environment:
       APNEA_DATA_DIR: /data
-      APNEA_API_TOKEN: ${APNEA_API_TOKEN:?Set APNEA_API_TOKEN in .env}
+      # Real auth is on by default. Create the operator account once with:
+      #   docker compose exec api apnea-admin create-user <username>
+      # Set this to 1 only for throwaway local runs with no auth at all.
+      APNEA_ALLOW_INSECURE_DEV: ${APNEA_ALLOW_INSECURE_DEV:-0}
+      APNEA_TRUSTED_ORIGINS: ${APNEA_TRUSTED_ORIGINS:-}
+      APNEA_TRUST_FORWARDED_FOR: ${APNEA_TRUST_FORWARDED_FOR:-0}
     volumes:
       - apnea-data:/data
     healthcheck:

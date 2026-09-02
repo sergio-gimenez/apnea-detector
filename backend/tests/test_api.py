@@ -18,6 +18,14 @@ def wav_bytes(samples: int = 16_000) -> bytes:
     return output.getvalue()
 
 
+def test_insecure_dev_disables_auth_and_opens_the_dashboard(tmp_path):
+    # conftest sets APNEA_ALLOW_INSECURE_DEV=1 for the whole suite
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'dev.db'}"))
+    assert client.get("/api/sessions").status_code == 200
+    session = client.get("/api/auth/session").json()
+    assert session["mfa_required"] is False and session["needs_enrollment"] is False
+
+
 def test_session_chunk_upload_is_idempotent(tmp_path):
     client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'test.db'}"))
     session_id = str(uuid.uuid4())
@@ -47,17 +55,6 @@ def test_session_chunk_upload_is_idempotent(tmp_path):
     assert first.json()["status"] == "uploaded"
     assert second.json()["status"] == "already_uploaded"
     assert client.get(f"/api/sessions/{session_id}").json()["total_samples"] == 16_000
-
-
-def test_bearer_token_protects_session_data(tmp_path, monkeypatch):
-    monkeypatch.setenv("APNEA_API_TOKEN", "s" * 32)
-    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'auth.db'}"))
-
-    assert client.get("/api/health").status_code == 200
-    assert client.get("/api/sessions").status_code == 401
-    assert client.get(
-        "/api/sessions", headers={"Authorization": f"Bearer {'s' * 32}"}
-    ).status_code == 200
 
 
 def test_summary_reports_odi_from_stored_spo2(tmp_path):

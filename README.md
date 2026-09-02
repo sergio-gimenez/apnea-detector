@@ -32,23 +32,28 @@ do not install a debug APK over an Obtainium release.
 - `python-garminconnect` pulls sleep, heart rate, Pulse Ox, and respiration payloads.
 - Browser dashboard shows whole-night signals, candidate evidence, authenticated audio clips,
   and confirmed/rejected/uncertain review labels.
-- High-entropy bearer token protects sensitive API and audio routes for public tunnel use.
+- One operator account: scrypt-hashed password, mandatory authenticator-app (TOTP) MFA,
+  opaque `HttpOnly` cookie sessions, and separately revocable per-device API tokens for the
+  recorder. All `/api/*` routes except `/api/health` require it.
 
 Deliberate prototype cuts: WAV instead of Opus, SQLite/local files instead of PostgreSQL/S3,
 synchronous analysis instead of a queue, generic Garmin payload normalization, no automatic
-retention, and no multi-user auth.
+retention, and a single operator account with no roles or self-service signup.
 
 ## Start backend
-
-Create `.env` from `.env.example`, replace placeholder with output of
-`openssl rand -hex 32`, then:
 
 ```sh
 docker compose up -d --build
 curl http://127.0.0.1:8080/api/health
+docker compose exec api apnea-admin create-user <username>
 ```
 
-Dashboard: `http://127.0.0.1:8080`. Browser requests API token on first data request.
+Dashboard: `http://127.0.0.1:8080`. First load prompts for the password, then walks through
+authenticator-app enrolment (scan the QR, confirm a code, save the recovery codes). After that
+the dashboard opens. Manage device tokens and active sign-ins from the **Security** panel.
+
+For a throwaway local run with authentication fully disabled, set `APNEA_ALLOW_INSECURE_DEV=1`
+(see `.env.example`).
 
 Authenticate Garmin inside persistent backend volume:
 
@@ -75,7 +80,9 @@ Debug APKs are local-test only. Public releases are built and signed by
 In app:
 
 1. Set backend URL, such as `https://sleep.sergiogimenez.com`.
-2. Enter same API token configured on backend.
+2. Enter a **device token**: dashboard → Security → *Mint a device token*, or
+   `apnea-admin mint-token <username> --name phone` on the server. Revoke it there if the
+   phone is lost; the password is never on the device.
 3. Start capture while app is foreground, grant microphone/notification permissions.
 4. Lock screen and leave phone charging, microphone unobstructed, near sleeper.
 5. Stop capture in morning.

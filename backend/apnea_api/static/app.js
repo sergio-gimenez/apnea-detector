@@ -42,17 +42,33 @@ const clockRange = (start, span) => {
   return `${dayPrefix(from)}${wallTime(from)} – ${wallTime(to)}`;
 };
 const clock = (seconds) => `${dayPrefix(atOffset(seconds))}${wallTime(atOffset(seconds))} (+${duration(seconds)})`;
-let apiToken = sessionStorage.getItem('apnea-api-token') || '';
-const api = async (url, options = {}, retried = false) => {
-  options.headers = {...(options.headers || {}), ...(apiToken ? {Authorization:`Bearer ${apiToken}`} : {})};
+/* ---------- auth ----------
+   The browser authenticates with an HttpOnly session cookie set at /api/auth/login;
+   same-origin fetch sends it automatically and attaches an Origin header the server
+   checks in place of a CSRF token. A 401 (or a 403 asking for MFA) on any data route
+   means the session lapsed, so drop straight back to the sign-in gate. */
+class AuthError extends Error {}
+const isGuarded = (url) => url.startsWith('/api/') && !url.startsWith('/api/auth/');
+const api = async (url, options = {}) => {
   const response = await fetch(url, options);
-  if (response.status === 401 && !retried) {
-    apiToken = prompt('Prototype API token') || '';
-    if (apiToken) sessionStorage.setItem('apnea-api-token', apiToken);
-    return api(url, options, true);
+  if (response.status === 401 || (response.status === 403 && isGuarded(url))) {
+    boot();
+    throw new AuthError('Signed out');
   }
-  if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
-  return response.json();
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { const body = await response.json(); detail = body.detail ?? detail; } catch {}
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  }
+  return response.status === 204 ? null : response.json();
+};
+const authPost = async (url, payload) => {
+  const response = await fetch(url, payload
+    ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)}
+    : {method: 'POST'});
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Something went wrong');
+  return body;
 };
 const announce = (message = '') => { $('#notice').textContent = message; };
 
@@ -127,9 +143,7 @@ async function selectEvent(id) {
     currentEvents[currentEvents.findIndex(item => item.id === id)] = updated;
     renderEvents(); selectEvent(id);
   });
-  const audioResponse = await fetch(`/api/events/${event.id}/audio.wav`, {
-    headers: apiToken ? {Authorization:`Bearer ${apiToken}`} : {},
-  });
+  const audioResponse = await fetch(`/api/events/${event.id}/audio.wav`);
   if (audioResponse.ok) $('#event-audio').src = URL.createObjectURL(await audioResponse.blob());
 }
 
@@ -159,7 +173,8 @@ $('#garmin').onclick = async () => { try { announce('Fetching Garmin sleep and h
 let batch = [], batchIndex = 0;
 
 const authedBlob = async (url) => {
-  const response = await fetch(url, {headers: apiToken ? {Authorization:`Bearer ${apiToken}`} : {}});
+  const response = await fetch(url);
+  if (response.status === 401 || response.status === 403) { boot(); throw new AuthError('Signed out'); }
   if (!response.ok) throw new Error(`Clip unavailable (${response.status})`);
   return URL.createObjectURL(await response.blob());
 };
@@ -463,4 +478,138 @@ $('#tz').onclick = () => {
 };
 
 window.addEventListener('resize', () => { if (currentSession) openSession(currentSession.id); renderWave(); });
-loadSessions().catch(error => announce(error.message));
+
+/* ---------- sign-in gate ---------- */
+const authError = (message = '') => { $('#auth-error').textContent = message; };
+const authStep = (id) => ['#auth-login', '#auth-mfa', '#auth-enroll', '#auth-recovery']
+  .forEach(step => $(step).classList.toggle('hidden', step !== `#${id}`));
+
+function showAuthGate() {
+  ['#auth', '#security', '#session-list', '#review']
+    .forEach(view => $(view).classList.toggle('hidden', view !== '#auth'));
+  $('#whoami').classList.add('hidden');
+  announce();
+}
+function showLogin() { showAuthGate(); authStep('auth-login'); authError(); }
+function showMfa() {
+  showAuthGate(); authStep('auth-mfa'); authError();
+  $('#auth-mfa-code').value = ''; $('#auth-mfa-code').focus();
+}
+async function startEnroll() {
+  showAuthGate(); authStep('auth-enroll'); authError();
+  try {
+    const setup = await authPost('/api/auth/mfa/setup');
+    $('#auth-qr').src = setup.qr_data_uri;
+    $('#auth-secret').textContent = setup.secret;
+  } catch (error) { authError(error.message); }
+}
+function enterApp(state) {
+  ['#auth', '#security', '#review'].forEach(view => $(view).classList.add('hidden'));
+  $('#session-list').classList.remove('hidden');
+  $('#whoami-name').textContent = state.username;
+  $('#whoami').classList.remove('hidden');
+  loadSessions().catch(error => announce(error.message));
+}
+
+async function boot() {
+  try {
+    const response = await fetch('/api/auth/session');
+    if (response.status === 401) return showLogin();
+    const state = await response.json();
+    if (state.mfa_required) return showMfa();
+    if (state.needs_enrollment) return startEnroll();
+    return enterApp(state);
+  } catch { return showLogin(); }
+}
+
+$('#auth-login-go').onclick = async () => {
+  authError('Checking…');
+  try {
+    const body = await authPost('/api/auth/login', {
+      username: $('#auth-username').value.trim(),
+      password: $('#auth-password').value,
+    });
+    $('#auth-password').value = '';
+    authError();
+    if (body.mfa_required) return showMfa();
+    if (body.needs_enrollment) return startEnroll();
+    return boot();
+  } catch (error) { authError(error.message); }
+};
+$('#auth-mfa-go').onclick = async () => {
+  authError('Verifying…');
+  try {
+    await authPost('/api/auth/mfa/verify', {code: $('#auth-mfa-code').value.trim()});
+    authError();
+    return boot();
+  } catch (error) { authError(error.message); }
+};
+$('#auth-enroll-go').onclick = async () => {
+  authError('Enabling…');
+  try {
+    const body = await authPost('/api/auth/mfa/enable', {code: $('#auth-enroll-code').value.trim()});
+    authError();
+    $('#auth-recovery-list').innerHTML = body.recovery_codes.map(code => `<li>${escapeHtml(code)}</li>`).join('');
+    authStep('auth-recovery');
+  } catch (error) { authError(error.message); }
+};
+$('#auth-recovery-go').onclick = () => boot();
+[['#auth-password', '#auth-login-go'], ['#auth-mfa-code', '#auth-mfa-go'], ['#auth-enroll-code', '#auth-enroll-go']]
+  .forEach(([input, button]) => $(input).addEventListener('keydown',
+    event => { if (event.key === 'Enter') $(button).click(); }));
+$('#signout').onclick = async () => { try { await authPost('/api/auth/logout'); } catch {} showLogin(); };
+
+/* ---------- security panel ---------- */
+const securityNotice = (message = '') => { $('#security-notice').textContent = message; };
+
+async function openSecurity() {
+  ['#session-list', '#review'].forEach(view => $(view).classList.add('hidden'));
+  $('#security').classList.remove('hidden');
+  securityNotice();
+  try { await Promise.all([renderTokens(), renderSignins()]); }
+  catch (error) { if (!(error instanceof AuthError)) securityNotice(error.message); }
+}
+async function renderTokens() {
+  const tokens = await api('/api/auth/tokens');
+  $('#token-list').innerHTML = tokens.length ? tokens.map(token => `
+    <div class="sec-row">
+      <div><b>${escapeHtml(token.name)}</b><small>added ${new Date(token.created_at).toLocaleDateString()} · ${token.last_used_at ? 'last used ' + new Date(token.last_used_at).toLocaleDateString() : 'never used'}</small></div>
+      <button data-revoke-token="${token.id}" class="ghost">Revoke</button>
+    </div>`).join('') : '<p class="muted">No device tokens yet.</p>';
+  document.querySelectorAll('[data-revoke-token]').forEach(button => button.onclick = async () => {
+    if (!confirm('Revoke this token? Any device using it stops working.')) return;
+    await api(`/api/auth/tokens/${button.dataset.revokeToken}`, {method: 'DELETE'});
+    securityNotice('Token revoked.');
+    renderTokens();
+  });
+}
+async function renderSignins() {
+  const rows = await api('/api/auth/sessions');
+  $('#session-rows').innerHTML = rows.map(row => `
+    <div class="sec-row">
+      <div><b>${row.current ? 'This device' : escapeHtml(row.user_agent || 'Unknown device')}</b><small>${escapeHtml(row.client_ip || '')} · last seen ${new Date(row.last_seen_at).toLocaleString()}</small></div>
+      ${row.current ? '' : `<button data-revoke-session="${row.id}" class="ghost">Revoke</button>`}
+    </div>`).join('');
+  document.querySelectorAll('[data-revoke-session]').forEach(button => button.onclick = async () => {
+    await api(`/api/auth/sessions/${button.dataset.revokeSession}`, {method: 'DELETE'});
+    renderSignins();
+  });
+}
+$('#token-new').onclick = async () => {
+  const name = (prompt('Name this device (e.g. "pixel 8")', 'recorder') || '').trim();
+  if (!name) return;
+  try {
+    const created = await api('/api/auth/tokens', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name}),
+    });
+    securityNotice(`Device token for “${name}” — copy it now, it is not shown again:\n${created.token}`);
+    renderTokens();
+  } catch (error) { if (!(error instanceof AuthError)) securityNotice(error.message); }
+};
+$('#security-toggle').onclick = openSecurity;
+$('#security-close').onclick = () => {
+  $('#security').classList.add('hidden');
+  $('#session-list').classList.remove('hidden');
+};
+
+boot();

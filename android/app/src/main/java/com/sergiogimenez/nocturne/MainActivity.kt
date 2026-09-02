@@ -449,11 +449,17 @@ private fun ConfigCard(
         OutlinedTextField(
             value = token,
             onValueChange = onTokenChange,
-            label = { Text("Prototype API token") },
+            label = { Text("Device token") },
             visualTransformation = PasswordVisualTransformation(),
             singleLine = true,
             colors = uploadFieldColors(),
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        Text(
+            "Mint one in the dashboard Security panel, or run apnea-admin mint-token on the server.",
+            color = Muted,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 6.dp),
         )
     }
 }

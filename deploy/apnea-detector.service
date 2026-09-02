@@ -10,7 +10,8 @@ Group=apnea-detector
 WorkingDirectory=/opt/apnea-detector/current/backend
 Environment=APNEA_DATA_DIR=/var/lib/apnea-detector
 Environment=GARMIN_TOKEN_STORE=/var/lib/apnea-detector/garmin
-EnvironmentFile=/etc/apnea-detector.env
+# Optional overrides (e.g. APNEA_TRUSTED_ORIGINS); the service runs without it.
+EnvironmentFile=-/etc/apnea-detector.env
 ExecStart=/opt/apnea-detector/current/venv/bin/uvicorn apnea_api.main:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=3

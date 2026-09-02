@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -125,6 +135,95 @@ class SleepArchitecture(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     session: Mapped[SleepSession] = relationship(back_populates="architecture")
+
+
+class User(Base):
+    """The single operator account.
+
+    ``totp_secret`` is the active MFA key; ``pending_totp_secret`` holds a key
+    that has been shown for enrolment but not yet confirmed with a code. Both are
+    plain base32, protected by the data directory's filesystem permissions, the
+    same posture as the stored Garmin OAuth tokens.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(80), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pending_totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # highest TOTP time step already accepted, so a captured code cannot be replayed
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+
+    sessions: Mapped[list[AuthSession]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    api_tokens: Mapped[list[ApiToken]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    recovery_codes: Mapped[list[MfaRecoveryCode]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class AuthSession(Base):
+    """A browser login. The cookie carries ``id.secret``; only the hash is stored,
+    so a database leak cannot be replayed as a session."""
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    secret_hash: Mapped[str] = mapped_column(String(64))
+    mfa_satisfied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class ApiToken(Base):
+    """A long-lived bearer credential for a non-browser device (the recorder).
+
+    Minted only by a fully authenticated session or the ``apnea-admin`` CLI, and
+    revocable independently of the password.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="api_tokens")
+
+
+class MfaRecoveryCode(Base):
+    """One single-use code that stands in for the authenticator when it is lost."""
+
+    __tablename__ = "mfa_recovery_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    user: Mapped[User] = relationship(back_populates="recovery_codes")
 
 
 class ReviewItem(Base):

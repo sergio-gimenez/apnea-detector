@@ -23,12 +23,26 @@ Installer creates:
 
 - Service user `apnea-detector`
 - Versioned code and venv under `/opt/apnea-detector/releases`, atomically selected by `current`
-- Sensitive data under `/var/lib/apnea-detector`
-- Random bearer token in `/etc/apnea-detector.env`, mode `0600`
+- Sensitive data under `/var/lib/apnea-detector` (SQLite DB holds the password hash, TOTP
+  secret, sessions, and device-token hashes; protected by the `0750` directory)
+- `/etc/apnea-detector.env`, mode `0600`, for optional overrides only (no secrets required)
 - Hardened `apnea-detector.service`, listening on `0.0.0.0:8080`
 
-Rerun installer after transferring newer code to upgrade. It preserves database, audio,
-Garmin tokens, and API token.
+Rerun installer after transferring newer code to upgrade. It preserves the database (accounts
+included), audio, and Garmin tokens.
+
+## Operator account
+
+No shared token. Create the account once, then finish MFA enrolment in the browser:
+
+```sh
+runuser -u apnea-detector -- env APNEA_DATA_DIR=/var/lib/apnea-detector \
+  /opt/apnea-detector/current/venv/bin/apnea-admin create-user <username>
+```
+
+Same binary does `passwd`, `reset-mfa`, `list-users`, and `mint-token <username> --name phone`
+to hand the recorder a revocable device token without the browser. The login rate limiter is
+in-process, which is why the service must stay a single uvicorn worker (no `--workers`).
 
 ## Garmin login
 
@@ -65,14 +79,24 @@ managed, so add public hostname in Cloudflare dashboard, not a local `config.yml
 sleep.sergiogimenez.com -> http://<new-lxc-ip>:8080
 ```
 
-Tunnel provides public TLS. Backend bearer token still protects all `/api/*` routes except
-`/api/health`; static dashboard shell contains no health data. Use random 64-hex token from
-`/etc/apnea-detector.env` in Android app and browser prompt.
+Tunnel provides public TLS. Password + TOTP MFA protects every `/api/*` route except
+`/api/health`; the static dashboard shell contains no data. The browser uses an `HttpOnly`
+session cookie; the Android app uses a device token minted from the Security panel.
 
-Cloudflare Access is optional defense in depth. If enabled for whole hostname, Android
-also needs an Access service token (`CF-Access-Client-Id` and `CF-Access-Client-Secret`),
-which this first APK does not yet support. For tonight, use backend bearer token and a
-high-entropy unguessable value. Do not make origin port reachable from internet directly.
+Because TLS terminates at the tunnel/NPM, the origin sees `http` while the browser's `Origin`
+header is `https`. The CSRF check prefers `X-Forwarded-Proto` and otherwise falls back to a
+host match, so it works as-is; add `APNEA_TRUSTED_ORIGINS=https://sleep.sergiogimenez.com` to
+`/etc/apnea-detector.env` for an exact scheme+host match.
+
+The login/MFA rate limiter buckets by client IP. Behind the proxy every request arrives from
+the proxy's address, so also set `APNEA_TRUST_FORWARDED_FOR=1` **once you have confirmed the
+origin port is not reachable except through NPM/Cloudflare** — otherwise a direct client could
+forge `X-Forwarded-For` to dodge the per-IP lockout (the per-username ceiling still applies).
+
+Cloudflare Access is now optional extra depth rather than the only barrier. If enabled for the
+whole hostname, the Android app also needs an Access service token (`CF-Access-Client-Id` /
+`CF-Access-Client-Secret`), which this APK does not yet send. Do not make the origin port
+reachable from the internet directly.
 
 ## Backup and retention
 

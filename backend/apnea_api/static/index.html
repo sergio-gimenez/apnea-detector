@@ -4,15 +4,66 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=9">
+    <link rel="stylesheet" href="/styles.css?v=10">
   </head>
   <body>
     <header>
       <div class="brand"><span class="pulse"></span> NOCTURNE / REVIEW</div>
       <div class="status">RESEARCH PROTOTYPE · NOT DIAGNOSTIC</div>
+      <div id="whoami" class="hidden">
+        <span id="whoami-name"></span>
+        <button id="security-toggle" class="ghost">Security</button>
+        <button id="signout" class="ghost">Sign out</button>
+      </div>
     </header>
     <main>
-      <section id="session-list" class="panel">
+      <section id="auth" class="panel auth-card hidden">
+        <p class="eyebrow">NOCTURNE / SIGN IN</p>
+        <div id="auth-login" class="auth-step">
+          <h1>Sign in</h1>
+          <p class="lede">Overnight audio and physiology for one operator. This page is not public data, but the login is what keeps it that way.</p>
+          <label>Username <input id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false"></label>
+          <label>Password <input id="auth-password" type="password" autocomplete="current-password"></label>
+          <button id="auth-login-go">Continue</button>
+        </div>
+        <div id="auth-mfa" class="auth-step hidden">
+          <h1>Authenticator code</h1>
+          <p class="lede">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+          <label>Code <input id="auth-mfa-code" inputmode="text" autocomplete="one-time-code" maxlength="40"></label>
+          <button id="auth-mfa-go">Verify</button>
+        </div>
+        <div id="auth-enroll" class="auth-step hidden">
+          <h1>Set up two-factor</h1>
+          <p class="lede">Scan this with an authenticator app (Aegis, 1Password, Google Authenticator…), then enter the code it shows. Two-factor is required before the dashboard opens.</p>
+          <div class="qr"><img id="auth-qr" alt="TOTP enrolment QR code"></div>
+          <p class="hint">Can't scan? Enter this key manually: <code id="auth-secret"></code></p>
+          <label>Code from the app <input id="auth-enroll-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+          <button id="auth-enroll-go">Enable two-factor</button>
+        </div>
+        <div id="auth-recovery" class="auth-step hidden">
+          <h1>Save your recovery codes</h1>
+          <p class="lede">Each code works once, in place of the authenticator if you lose it. Store them somewhere safe — they are shown only now.</p>
+          <ul id="auth-recovery-list" class="recovery-codes"></ul>
+          <button id="auth-recovery-go">I've saved these — continue</button>
+        </div>
+        <p id="auth-error" class="auth-error"></p>
+      </section>
+
+      <section id="security" class="panel hidden">
+        <div class="review-head">
+          <div><p class="eyebrow">ACCOUNT</p><h1>Security</h1></div>
+          <div class="actions"><button id="security-close" class="ghost">Close</button></div>
+        </div>
+        <div id="security-notice"></div>
+        <p class="eyebrow">DEVICE TOKENS</p>
+        <p class="hint">Long-lived bearer tokens for the recorder app. Each can be revoked without touching your password.</p>
+        <div id="token-list"></div>
+        <button id="token-new">Mint a device token</button>
+        <p class="eyebrow" style="margin-top:32px">ACTIVE SIGN-INS</p>
+        <div id="session-rows"></div>
+      </section>
+
+      <section id="session-list" class="panel hidden">
         <p class="eyebrow">OVERNIGHT CAPTURES</p>
         <h1>Respiratory evidence,<br><em>aligned in time.</em></h1>
         <p class="lede">Phone audio and wearable physiology, reduced to reviewable candidates. Raw evidence remains primary.</p>
@@ -90,6 +141,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=9"></script>
+    <script src="/app.js?v=10"></script>
   </body>
 </html>

@@ -10,7 +10,7 @@ unset CDPATH
 SOURCE_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd)
 
 apt-get update
-apt-get install -y openssl python3 python3-venv
+apt-get install -y python3 python3-venv
 
 if ! id apnea-detector >/dev/null 2>&1; then
     useradd --system --home /var/lib/apnea-detector --shell /usr/sbin/nologin apnea-detector
@@ -36,7 +36,8 @@ mv -Tf "/opt/apnea-detector/.current-$RELEASE_NAME" /opt/apnea-detector/current
 
 if [ ! -f /etc/apnea-detector.env ]; then
     umask 077
-    printf 'APNEA_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/apnea-detector.env
+    printf '%s\n' "# Optional overrides, e.g. APNEA_TRUSTED_ORIGINS=https://sleep.example.com" \
+        > /etc/apnea-detector.env
 fi
 chmod 0600 /etc/apnea-detector.env
 
@@ -45,5 +46,13 @@ systemctl daemon-reload
 systemctl enable apnea-detector.service
 systemctl restart apnea-detector.service
 
+ADMIN="runuser -u apnea-detector -- env APNEA_DATA_DIR=/var/lib/apnea-detector \
+/opt/apnea-detector/current/venv/bin/apnea-admin"
+
 printf '%s\n' "Installed. Health endpoint: http://127.0.0.1:8080/api/health"
-printf '%s\n' "API token remains in /etc/apnea-detector.env (mode 0600)."
+if $ADMIN list-users 2>/dev/null | grep -q .; then
+    printf '%s\n' "Operator account already present. Manage it with: apnea-admin ..."
+else
+    printf '%s\n' "No operator account yet. Create one, then sign in and scan the MFA QR:"
+    printf '  %s\n' "$ADMIN create-user <username>"
+fi

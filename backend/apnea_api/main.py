@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import math
 import io
@@ -59,6 +60,7 @@ from .schemas import (
     LabelUpdate,
     ReviewBatchRequest,
     ReviewUpdate,
+    SessionAnnotation,
     SessionCreate,
     SignalBatch,
 )
@@ -96,6 +98,21 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+def _clean_tags(raw: list) -> list[str]:
+    """Normalise operator tags: trimmed, lowercase, whitespace-collapsed, unique,
+    order-preserving, ≤40 chars each, ≤40 total."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        norm = " ".join(str(item).split()).lower()[:40]
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+        if len(out) >= 40:
+            break
+    return out
+
+
 def _session_json(row: SleepSession) -> dict:
     duration = session_elapsed_seconds(row, row.chunks)
     return {
@@ -111,6 +128,8 @@ def _session_json(row: SleepSession) -> dict:
         "snore_bursts": row.snore_bursts or 0,
         "recorded_seconds": row.total_samples / row.sample_rate if row.sample_rate else 0,
         "duration_seconds": duration,
+        "notes": row.notes or "",
+        "tags": json.loads(row.tags) if row.tags else [],
         "created_at": _as_utc(row.created_at).isoformat(),
         "completed_at": _as_utc(row.completed_at).isoformat() if row.completed_at else None,
     }
@@ -243,6 +262,28 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str, db: Session = Depends(get_db)) -> dict:
         return _session_json(get_session_or_404(session_id, db))
+
+    @app.patch("/api/sessions/{session_id}")
+    def annotate_session(
+        session_id: str, payload: SessionAnnotation, db: Session = Depends(get_db)
+    ) -> dict:
+        session = get_session_or_404(session_id, db)
+        if payload.notes is not None:
+            session.notes = payload.notes.strip() or None
+        if payload.tags is not None:
+            session.tags = json.dumps(_clean_tags(payload.tags))
+        db.commit()
+        return _session_json(session)
+
+    @app.get("/api/tags")
+    def known_tags(db: Session = Depends(get_db)) -> list[str]:
+        counts: dict[str, int] = {}
+        for (blob,) in db.execute(
+            select(SleepSession.tags).where(SleepSession.tags.is_not(None))
+        ):
+            for tag in json.loads(blob or "[]"):
+                counts[tag] = counts.get(tag, 0) + 1
+        return [tag for tag, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     @app.post("/api/sessions/{session_id}/audio-chunks")
     async def upload_audio_chunk(
@@ -758,12 +799,10 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         ).all()
         return score_batch([(kind, label) for kind, label in rows])
 
-    @app.get("/api/sessions/{session_id}/summary")
-    def summary(session_id: str, db: Session = Depends(get_db)) -> dict:
-        session = get_session_or_404(session_id, db)
+    def build_summary(session: SleepSession, db: Session) -> dict:
         events = list(
             db.scalars(
-                select(RespiratoryEvent).where(RespiratoryEvent.session_id == session_id)
+                select(RespiratoryEvent).where(RespiratoryEvent.session_id == session.id)
             )
         )
         oximetry = session_oximetry(session, db).as_json()
@@ -774,7 +813,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             if (json.loads(event.evidence_json).get("spo2_drop") or 0) >= 3.0
         )
         architecture = db.scalar(
-            select(SleepArchitecture).where(SleepArchitecture.session_id == session_id)
+            select(SleepArchitecture).where(SleepArchitecture.session_id == session.id)
         )
         sleep_seconds = (architecture.sleep_seconds or 0) if architecture else 0
 
@@ -821,6 +860,73 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             "oximetry": oximetry,
             "disclaimer": "Screening metric only. SREI is not AHI and this is not a diagnosis.",
         }
+
+    @app.get("/api/sessions/{session_id}/summary")
+    def summary(session_id: str, db: Session = Depends(get_db)) -> dict:
+        return build_summary(get_session_or_404(session_id, db), db)
+
+    # One flat record per night — the operator's context plus every computed metric.
+    # This is the hand-off point for later correlation work (a notebook, or an LLM).
+    _EXPORT_COLUMNS = [
+        "night_utc", "tags", "notes", "status", "hours_analyzed", "srei",
+        "suspected_events", "events_over_20s", "events_over_30s", "correlated_events",
+        "minimum_spo2", "mean_spo2", "odi3", "odi4", "t90_seconds", "spo2_coverage_hours",
+        "snoring_burden_percent", "snore_bursts", "sleep_score", "sleep_hours",
+        "deep_percent", "light_percent", "rem_percent", "awakenings", "restless_moments",
+    ]
+
+    def _export_row(record: dict) -> dict:
+        s = record["summary"]
+        arch = s.get("sleep_architecture") or {}
+        return {
+            "night_utc": record["started_at_utc"],
+            "tags": "|".join(record["tags"]),
+            "notes": record["notes"],
+            "status": record["status"],
+            "hours_analyzed": s["hours_analyzed"],
+            "srei": s["srei"],
+            "suspected_events": s["suspected_events"],
+            "events_over_20s": s["events_over_20s"],
+            "events_over_30s": s["events_over_30s"],
+            "correlated_events": s["correlated_events"],
+            "minimum_spo2": s["minimum_spo2"],
+            "mean_spo2": s["mean_spo2"],
+            "odi3": s["odi3"],
+            "odi4": s["odi4"],
+            "t90_seconds": s["t90_seconds"],
+            "spo2_coverage_hours": s["spo2_coverage_hours"],
+            "snoring_burden_percent": s["snoring_burden_percent"],
+            "snore_bursts": s["snore_bursts"],
+            "sleep_score": arch.get("sleep_score"),
+            "sleep_hours": arch.get("sleep_hours"),
+            "deep_percent": arch.get("deep_percent"),
+            "light_percent": arch.get("light_percent"),
+            "rem_percent": arch.get("rem_percent"),
+            "awakenings": arch.get("awake_count"),
+            "restless_moments": arch.get("restless_moments"),
+        }
+
+    @app.get("/api/export")
+    def export_all(fmt: str = "json", db: Session = Depends(get_db)):
+        rows = db.scalars(select(SleepSession).order_by(SleepSession.started_at_utc))
+        records = []
+        for session in rows:
+            record = _session_json(session)
+            record["summary"] = build_summary(session, db)
+            records.append(record)
+        if fmt != "csv":
+            return records
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=_EXPORT_COLUMNS)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(_export_row(record))
+        buffer.seek(0)
+        return StreamingResponse(
+            iter([buffer.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="nocturne-export.csv"'},
+        )
 
     app.include_router(
         build_auth_router(

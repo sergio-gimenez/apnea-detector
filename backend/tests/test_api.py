@@ -288,3 +288,58 @@ def test_event_waveform_matches_review_item_shape(tmp_path):
     assert isinstance(wave["bursts"], list) and isinstance(wave["spo2"], list)
     assert client.get(f"/api/events/{event_id}/audio.wav").status_code == 200
     assert client.get("/api/events/999999/waveform").status_code == 404
+
+
+def test_night_context_notes_and_tags_round_trip(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'context.db'}"))
+    session_id, _ = _session_with_audio(client, minutes=5)
+
+    fresh = client.get(f"/api/sessions/{session_id}").json()
+    assert fresh["notes"] == "" and fresh["tags"] == []
+
+    saved = client.patch(
+        f"/api/sessions/{session_id}",
+        json={"notes": "  slept in the van, windy  ", "tags": ["Van", " van ", "With Partner", ""]},
+    ).json()
+    # tags are normalised (trimmed, lowercased, deduped) and notes are stripped
+    assert saved["tags"] == ["van", "with partner"]
+    assert saved["notes"] == "slept in the van, windy"
+
+    # either field may be sent on its own; the other is left alone
+    only_notes = client.patch(f"/api/sessions/{session_id}", json={"notes": "drank tonight"}).json()
+    assert only_notes["tags"] == ["van", "with partner"]
+    assert only_notes["notes"] == "drank tonight"
+
+    # tags surface on the list view and in the known-tag vocabulary
+    assert client.get("/api/sessions").json()[0]["tags"] == ["van", "with partner"]
+    assert client.get("/api/tags").json() == ["van", "with partner"]
+
+    # clearing works: empty notes fall back to "", empty tag list to []
+    cleared = client.patch(f"/api/sessions/{session_id}", json={"notes": "", "tags": []}).json()
+    assert cleared["notes"] == "" and cleared["tags"] == []
+    assert client.get("/api/tags").json() == []
+    assert client.patch("/api/sessions/does-not-exist", json={"notes": "x"}).status_code == 404
+
+
+def test_export_carries_context_and_metrics_for_every_night(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'export.db'}"))
+    session_id, _ = _session_with_audio(client, minutes=5)
+    client.post(f"/api/sessions/{session_id}/analyze")
+    client.patch(
+        f"/api/sessions/{session_id}",
+        json={"notes": "did sport", "tags": ["sport", "alone"]},
+    )
+
+    records = client.get("/api/export").json()
+    assert len(records) == 1
+    assert records[0]["tags"] == ["sport", "alone"]
+    assert records[0]["notes"] == "did sport"
+    # the computed per-night metrics ride along, so one pull is enough to correlate
+    assert records[0]["summary"]["srei"] == client.get(f"/api/sessions/{session_id}/summary").json()["srei"]
+
+    csv_response = client.get("/api/export?fmt=csv")
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    lines = csv_response.text.strip().splitlines()
+    assert lines[0].startswith("night_utc,tags,notes,status,")
+    assert len(lines) == 2
+    assert "sport|alone" in lines[1] and "did sport" in lines[1]

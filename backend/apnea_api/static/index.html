@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=11">
+    <link rel="stylesheet" href="/styles.css?v=12">
   </head>
   <body>
     <header>
@@ -68,6 +68,11 @@
         <h1>Respiratory evidence,<br><em>aligned in time.</em></h1>
         <p class="lede">Phone audio and wearable physiology, reduced to reviewable candidates. Raw evidence remains primary.</p>
         <div id="sessions" class="sessions"></div>
+        <div class="export-bar">
+          <span class="eyebrow">EXPORT EVERY NIGHT</span>
+          <button id="export-csv" class="ghost">CSV</button>
+          <button id="export-json" class="ghost">JSON</button>
+        </div>
       </section>
 
       <section id="review" class="hidden">
@@ -87,6 +92,16 @@
         <div id="notice"></div>
         <p class="eyebrow" id="algorithm"></p>
         <div id="metrics" class="metrics"></div>
+        <section id="context" class="panel context-panel">
+          <div class="context-head">
+            <p class="eyebrow">NIGHT CONTEXT</p>
+            <span id="context-saved" class="saved-flag"></span>
+          </div>
+          <div id="context-tags" class="chips"></div>
+          <input id="context-tag-input" type="text" autocomplete="off" placeholder="add a tag, then Enter (e.g. van, alcohol, with partner)">
+          <div id="context-suggest" class="tag-suggest"></div>
+          <textarea id="context-notes" rows="3" placeholder="Anything about tonight — where you slept, company, alcohol, sport, illness, meds, how the day went…"></textarea>
+        </section>
         <section id="architecture" class="panel arch-panel"></section>
         <section class="panel timeline-panel">
           <div class="timeline-title">
@@ -171,6 +186,6 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=11"></script>
+    <script src="/app.js?v=12"></script>
   </body>
 </html>

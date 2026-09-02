@@ -12,6 +12,13 @@ class SessionCreate(BaseModel):
     sample_rate: int = Field(default=16_000, ge=8_000, le=48_000)
 
 
+class SessionAnnotation(BaseModel):
+    """Operator context for a night. Either field may be sent on its own."""
+
+    notes: str | None = Field(default=None, max_length=8000)
+    tags: list[str] | None = Field(default=None, max_length=64)
+
+
 class SignalIn(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     timestamp_utc: datetime

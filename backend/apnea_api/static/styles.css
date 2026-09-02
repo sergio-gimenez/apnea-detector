@@ -87,3 +87,24 @@ button.ghost { background:transparent;color:var(--muted); }
 #inspect-status:not(:empty) { margin:10px 0 0;color:var(--cyan); }
 .review-buttons button.active { border-color:var(--cyan);color:var(--cyan); }
 #inspect-nav { display:flex;justify-content:space-between;margin-top:18px; }
+
+/* ---------- night context (notes + tags) ---------- */
+.export-bar { display:flex;align-items:center;gap:10px;margin-top:28px; }
+.export-bar .eyebrow { margin:0;flex:1; }
+.export-bar button { padding:8px 14px;font:11px 'DM Mono',monospace;letter-spacing:.08em; }
+.session .card-tags { display:block;margin-top:10px;color:var(--purple);font-size:11px; }
+.context-panel { margin-bottom:18px;padding:20px 22px; }
+.context-head { display:flex;justify-content:space-between;align-items:baseline; }
+.context-head .eyebrow { margin-bottom:12px; }
+.saved-flag { font:11px 'DM Mono',monospace;color:var(--green); }
+.chips { display:flex;flex-wrap:wrap;gap:8px;min-height:26px;align-items:center; }
+.chip { display:inline-flex;align-items:center;gap:7px;padding:5px 8px 5px 11px;border:1px solid var(--purple);color:var(--purple);font:11px 'DM Mono',monospace; }
+.chip button { background:none;border:0;color:inherit;padding:0 2px;font-size:13px;line-height:1;cursor:pointer;opacity:.65; }
+.chip button:hover { opacity:1; }
+#context-tag-input { display:block;width:100%;margin:14px 0 10px;padding:11px 13px;background:#0c1115;border:1px solid var(--line);color:var(--ink);font-size:14px; }
+#context-tag-input:focus { outline:none;border-color:var(--cyan); }
+.tag-suggest { display:flex;flex-wrap:wrap;gap:6px; }
+.tag-suggest button { padding:5px 9px;border:1px dashed #3b4a54;background:none;color:var(--muted);font:11px 'DM Mono',monospace; }
+.tag-suggest button:hover { color:var(--cyan);border-color:var(--cyan);border-style:solid; }
+#context-notes { display:block;width:100%;margin-top:14px;padding:12px 13px;background:#0c1115;border:1px solid var(--line);color:var(--ink);font:14px/1.5 Arial,sans-serif;resize:vertical; }
+#context-notes:focus { outline:none;border-color:var(--cyan); }

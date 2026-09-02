@@ -35,6 +35,12 @@ do not install a debug APK over an Obtainium release.
 - One operator account: scrypt-hashed password, mandatory authenticator-app (TOTP) MFA,
   opaque `HttpOnly` cookie sessions, and separately revocable per-device API tokens for the
   recorder. All `/api/*` routes except `/api/health` require it.
+- Per-night context: free-text notes plus normalized tags (`van`, `alcohol`, `with partner`,
+  `sick`, …), autosaved from the dashboard, so nightly circumstances accumulate alongside the
+  metrics.
+- `GET /api/export` returns every night as one flat record — context plus every computed
+  metric — as JSON, or `?fmt=csv` for a spreadsheet. That is the hand-off point for later
+  correlation work once enough nights exist.
 
 Deliberate prototype cuts: WAV instead of Opus, SQLite/local files instead of PostgreSQL/S3,
 synchronous analysis instead of a queue, generic Garmin payload normalization, no automatic

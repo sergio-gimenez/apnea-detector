@@ -73,15 +73,36 @@ const authPost = async (url, payload) => {
 const announce = (message = '') => { $('#notice').textContent = message; };
 
 async function loadSessions() {
-  const sessions = await api('/api/sessions');
+  // tags already used on other nights come back with the list so the suggestion
+  // row grows with the operator's own vocabulary, not just the seeded one
+  const [sessions, tags] = await Promise.all([api('/api/sessions'), api('/api/tags')]);
+  knownTags = tags;
   $('#sessions').innerHTML = sessions.length ? sessions.map(session => `
     <button class="session" data-id="${session.id}">
       <small>${session.status.toUpperCase()} / ${session.id.slice(0,8)}</small>
       <strong>${new Date(session.started_at_utc).toLocaleString()}</strong>
       <small>${duration(session.duration_seconds)} · ${escapeHtml(session.device_id)}</small>
+      ${session.tags && session.tags.length
+        ? `<small class="card-tags">${session.tags.slice(0, 5).map(escapeHtml).join(' · ')}</small>` : ''}
     </button>`).join('') : '<p class="muted">No uploads yet. Start an Android capture.</p>';
   document.querySelectorAll('.session').forEach(button => button.onclick = () => openSession(button.dataset.id));
 }
+
+async function downloadExport(fmt) {
+  try {
+    const response = await fetch(`/api/export?fmt=${fmt}`);
+    if (response.status === 401 || response.status === 403) { boot(); return; }
+    if (!response.ok) { announce(`Export failed (${response.status})`); return; }
+    const url = URL.createObjectURL(await response.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nocturne-export.${fmt === 'csv' ? 'csv' : 'json'}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (error) { if (!(error instanceof AuthError)) announce(error.message); }
+}
+$('#export-csv').onclick = () => downloadExport('csv');
+$('#export-json').onclick = () => downloadExport('json');
 
 async function openSession(id) {
   [currentSession, currentEvents] = await Promise.all([api(`/api/sessions/${id}`), api(`/api/sessions/${id}/events`)]);
@@ -118,9 +139,90 @@ async function openSession(id) {
     $('#inspect').classList.add('hidden');
     inspectId = null;
   }
+  renderContext();
   renderEvents();
   drawTimeline(signals, currentEvents, oximetry.events || []);
 }
+
+/* ---------- night context (notes + tags) ----------
+   Free-form tags plus a notes box, autosaved: tags on every change, notes on
+   blur and after a short idle. The accumulated context is what a later analysis
+   (a notebook, or an LLM) would correlate against the metrics — see /api/export. */
+const SUGGESTED_TAGS = [
+  'van', 'home', 'hotel', 'alone', 'with partner', 'alcohol', 'sport', 'sick',
+  'late caffeine', 'big meal', 'stressed', 'travel', 'nasal strip', 'back sleeping',
+  'allergies', 'poor day',
+];
+let knownTags = [];
+let notesTimer = null;
+
+const cleanTag = (raw) => raw.trim().replace(/\s+/g, ' ').toLowerCase().slice(0, 40);
+
+const flashSaved = () => {
+  $('#context-saved').textContent = 'saved ✓';
+  clearTimeout(flashSaved._t);
+  flashSaved._t = setTimeout(() => { $('#context-saved').textContent = ''; }, 1500);
+};
+
+async function saveContext(patch) {
+  try {
+    const updated = await api(`/api/sessions/${currentSession.id}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(patch),
+    });
+    currentSession.notes = updated.notes;
+    currentSession.tags = updated.tags;
+    flashSaved();
+  } catch (error) { if (!(error instanceof AuthError)) announce(error.message); }
+}
+
+function setTags(tags) {
+  const cleaned = [];
+  for (const tag of tags) {
+    const norm = cleanTag(tag);
+    if (norm && !cleaned.includes(norm)) cleaned.push(norm);
+  }
+  currentSession.tags = cleaned;
+  renderContext();
+  saveContext({tags: cleaned});
+}
+
+function renderContext() {
+  const tags = currentSession.tags || [];
+  $('#context-tags').innerHTML = tags.length
+    ? tags.map(tag =>
+        `<span class="chip">${escapeHtml(tag)}<button data-drop="${escapeHtml(tag)}" aria-label="remove">×</button></span>`).join('')
+    : '<span class="muted">No tags yet.</span>';
+  document.querySelectorAll('#context-tags [data-drop]').forEach(button => {
+    button.onclick = () => setTags(tags.filter(tag => tag !== button.dataset.drop));
+  });
+  const options = [...new Set([...SUGGESTED_TAGS, ...knownTags])].filter(tag => !tags.includes(tag));
+  $('#context-suggest').innerHTML = options
+    .map(tag => `<button data-add="${escapeHtml(tag)}">+ ${escapeHtml(tag)}</button>`).join('');
+  document.querySelectorAll('#context-suggest [data-add]').forEach(button => {
+    button.onclick = () => setTags([...tags, button.dataset.add]);
+  });
+  if ($('#context-notes').value !== (currentSession.notes || '')) {
+    $('#context-notes').value = currentSession.notes || '';
+  }
+}
+
+$('#context-tag-input').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+  event.preventDefault();
+  const raw = $('#context-tag-input').value;
+  $('#context-tag-input').value = '';
+  if (raw.trim()) setTags([...(currentSession.tags || []), ...raw.split(',')]);
+});
+$('#context-notes').addEventListener('input', () => {
+  clearTimeout(notesTimer);
+  notesTimer = setTimeout(() => saveContext({notes: $('#context-notes').value}), 1000);
+});
+$('#context-notes').addEventListener('blur', () => {
+  clearTimeout(notesTimer);
+  if ($('#context-notes').value !== (currentSession.notes || '')) {
+    saveContext({notes: $('#context-notes').value});
+  }
+});
 
 const QUEUE_SORT_KEY = 'apnea-queue-sort';
 let queueSort = 'time';

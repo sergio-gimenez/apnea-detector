@@ -36,6 +36,9 @@ class SleepSession(Base):
     total_samples: Mapped[int] = mapped_column(BigInteger, default=0)
     snoring_burden_percent: Mapped[float] = mapped_column(Float, default=0.0)
     snore_bursts: Mapped[int] = mapped_column(Integer, default=0)
+    # operator's own context for the night: free text + a JSON array of tag strings
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

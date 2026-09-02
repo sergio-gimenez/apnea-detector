@@ -339,9 +339,15 @@ def build_auth_router(
             yield db
 
     def client_ip(request: Request) -> str:
-        # X-Forwarded-For is forgeable by anything talking straight to the origin,
-        # so it is trusted only when the operator confirms a proxy always sets it.
+        # Forwarding headers are forgeable by anything talking straight to the
+        # origin, so they are read only when the operator confirms a proxy always
+        # sets them. CF-Connecting-IP wins because Cloudflare overwrites it with
+        # the real edge client; a client-supplied X-Forwarded-For only gets
+        # appended to, so its leftmost entry can be a lie.
         if trust_forwarded_for:
+            cf = request.headers.get("cf-connecting-ip")
+            if cf:
+                return cf.strip()
             forwarded = request.headers.get("x-forwarded-for")
             if forwarded:
                 return forwarded.split(",")[0].strip()

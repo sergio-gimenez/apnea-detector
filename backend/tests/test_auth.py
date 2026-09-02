@@ -153,6 +153,31 @@ def test_null_origin_is_refused_on_cookie_mutations(app):
     assert c.post("/api/auth/logout", headers={"Origin": "null"}).status_code == 403
 
 
+def test_lockout_keys_on_cloudflare_ip_when_forwarding_is_trusted(tmp_path, monkeypatch):
+    monkeypatch.delenv("APNEA_ALLOW_INSECURE_DEV", raising=False)
+    monkeypatch.setenv("APNEA_TRUST_FORWARDED_FOR", "1")
+    db_url = f"sqlite:///{tmp_path / 'xff.db'}"
+    application = create_app(tmp_path, db_url)
+    with sessionmaker(create_engine(db_url))() as db:
+        create_user(db, USERNAME, PASSWORD)
+    c = TestClient(application, base_url=ORIGIN, headers={"Origin": ORIGIN})
+
+    attacker = {"CF-Connecting-IP": "203.0.113.9"}
+    for _ in range(8):
+        assert c.post(
+            "/api/auth/login", json={"username": USERNAME, "password": "wrong"}, headers=attacker
+        ).status_code == 401
+    assert c.post(
+        "/api/auth/login", json={"username": USERNAME, "password": "wrong"}, headers=attacker
+    ).status_code == 429
+    # a different edge client is not caught by the per-IP lock (the leftmost
+    # X-Forwarded-For is ignored in favour of CF-Connecting-IP)
+    victim = {"CF-Connecting-IP": "198.51.100.7", "X-Forwarded-For": "203.0.113.9"}
+    assert c.post(
+        "/api/auth/login", json={"username": USERNAME, "password": PASSWORD}, headers=victim
+    ).status_code == 200
+
+
 def test_recovery_code_authenticates_once(app):
     _, codes = enroll(client(app))
 

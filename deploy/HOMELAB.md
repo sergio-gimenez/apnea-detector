@@ -11,10 +11,12 @@ before creating anything. Do not reuse an address from the 2026-08-10 inventory 
 
 ## Install inside LXC
 
-Transfer this repository into the new LXC, then run from repository root:
+First install: clone this repository into the LXC at `/opt/apnea-detector/src`, then run
+from the repository root:
 
 ```sh
-sudo ./deploy/install-lxc.sh
+git clone -b main https://github.com/sergio-gimenez/apnea-detector.git /opt/apnea-detector/src
+sh /opt/apnea-detector/src/deploy/install-lxc.sh
 systemctl status apnea-detector
 curl http://127.0.0.1:8080/api/health
 ```
@@ -28,8 +30,30 @@ Installer creates:
 - `/etc/apnea-detector.env`, mode `0600`, for optional overrides only (no secrets required)
 - Hardened `apnea-detector.service`, listening on `0.0.0.0:8080`
 
-Rerun installer after transferring newer code to upgrade. It preserves the database (accounts
-included), audio, and Garmin tokens.
+## Upgrade
+
+That one checkout stays on the box, so a redeploy transfers only the new commits:
+
+```sh
+ssh apnea-detector 'sh /opt/apnea-detector/src/deploy/update.sh'
+```
+
+`update.sh` fetches the branch, hard-resets the checkout to it (that tree exists only to
+build from, so local edits there are discarded and reported), rebuilds through
+`install-lxc.sh`, and prunes all but the newest `APNEA_KEEP_RELEASES` releases — never the
+one `current` points at. It exits without rebuilding when the checkout is already at the
+remote head; pass `--force` to rebuild anyway.
+
+Either path preserves the database (accounts included), audio, and Garmin tokens. New
+nullable columns are added to the existing database on start-up by `add_missing_columns`,
+so no data is thrown away to pick up a new field.
+
+Roll back to the previous release without touching git:
+
+```sh
+ssh apnea-detector 'ln -sfn releases/<older> /opt/apnea-detector/current \
+  && systemctl restart apnea-detector'
+```
 
 ## Operator account
 

@@ -14,8 +14,12 @@ fi
 unset CDPATH
 SOURCE_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd)
 
-apt-get update
-apt-get install -y python3 python3-venv
+# redeploys run this repeatedly; the package index refresh is only worth its
+# ~20s when something is actually missing
+if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y python3 python3-venv
+fi
 
 if ! id apnea-detector >/dev/null 2>&1; then
     useradd --system --home /var/lib/apnea-detector --shell /usr/sbin/nologin apnea-detector

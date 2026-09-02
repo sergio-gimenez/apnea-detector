@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# `python3 -m venv` honours the caller's umask; a restrictive one (e.g. 077 set
+# to protect a secret) would make the venv unreadable to the service user and the
+# unit would fail with status=203/EXEC. Pin a sane umask regardless of the caller.
+umask 022
+
 if [ "$(id -u)" -ne 0 ]; then
     printf '%s\n' "Run as root inside the dedicated LXC." >&2
     exit 1
@@ -29,15 +34,17 @@ rm -rf "$RELEASE/backend/apnea_api/__pycache__"
 
 python3 -m venv "$RELEASE/venv"
 "$RELEASE/venv/bin/pip" install --no-cache-dir "$RELEASE/backend"
+# the service user only reads this tree; make traversal explicit no matter the umask
+chmod -R a+rX "$RELEASE"
 trap - EXIT
 
 ln -s "releases/$RELEASE_NAME" "/opt/apnea-detector/.current-$RELEASE_NAME"
 mv -Tf "/opt/apnea-detector/.current-$RELEASE_NAME" /opt/apnea-detector/current
 
 if [ ! -f /etc/apnea-detector.env ]; then
-    umask 077
-    printf '%s\n' "# Optional overrides, e.g. APNEA_TRUSTED_ORIGINS=https://sleep.example.com" \
-        > /etc/apnea-detector.env
+    ( umask 077
+      printf '%s\n' "# Optional overrides, e.g. APNEA_TRUSTED_ORIGINS=https://sleep.example.com" \
+        > /etc/apnea-detector.env )
 fi
 chmod 0600 /etc/apnea-detector.env
 

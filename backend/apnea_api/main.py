@@ -6,6 +6,7 @@ import math
 import io
 import json
 import os
+import shutil
 import uuid
 import wave
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, delete, event, inspect, select, text
+from sqlalchemy import create_engine, delete, event, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .analysis import (
@@ -92,6 +93,18 @@ def add_missing_columns(engine) -> None:
                 clause += f" DEFAULT {default!r}" if isinstance(default, str) else f" DEFAULT {default}"
             with engine.begin() as connection:
                 connection.execute(text(clause))
+
+
+def _audio_dir_for(chunks_root: Path, session_id: str) -> Path:
+    """Per-session audio directory, refusing any id that would escape the store.
+
+    Session ids come from the phone and are only length-checked, so a crafted id
+    could otherwise reach outside the data directory on write or delete.
+    """
+    candidate = (chunks_root / session_id).resolve()
+    if candidate == chunks_root or not candidate.is_relative_to(chunks_root):
+        raise HTTPException(400, "Invalid session id")
+    return candidate
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -275,6 +288,21 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         db.commit()
         return _session_json(session)
 
+    @app.delete("/api/sessions/{session_id}")
+    def delete_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+        """Erase a night: its row, every child row via ON DELETE CASCADE, and the
+        recorded audio on disk. Irreversible — there is no soft-delete or bin."""
+        session = get_session_or_404(session_id, db)
+        audio_dir = _audio_dir_for(chunks_root, session.id)
+        chunks = db.scalar(
+            select(func.count()).select_from(AudioChunk).where(AudioChunk.session_id == session.id)
+        )
+        db.delete(session)
+        db.commit()
+        # only once the row is gone, so a failed commit never orphans the audio
+        shutil.rmtree(audio_dir, ignore_errors=True)
+        return {"deleted": session.id, "audio_chunks_removed": chunks or 0}
+
     @app.get("/api/tags")
     def known_tags(db: Session = Depends(get_db)) -> list[str]:
         counts: dict[str, int] = {}
@@ -347,7 +375,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         if overlap:
             raise HTTPException(409, f"Audio overlaps existing sequence {overlap.sequence}")
 
-        session_dir = chunks_root / session_id
+        session_dir = _audio_dir_for(chunks_root, session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         relative = Path("audio") / session_id / f"audio_{sequence:05d}.wav"
         destination = root / relative

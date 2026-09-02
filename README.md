@@ -38,6 +38,9 @@ do not install a debug APK over an Obtainium release.
 - Per-night context: free-text notes plus normalized tags (`van`, `alcohol`, `with partner`,
   `sick`, …), autosaved from the dashboard, so nightly circumstances accumulate alongside the
   metrics.
+- `DELETE /api/sessions/{id}` erases a night for good: its row, every child row via
+  `ON DELETE CASCADE`, and the recorded audio on disk. The dashboard button arms on the
+  first click and only deletes on a second. There is no soft-delete or bin.
 - `GET /api/export` returns every night as one flat record — context plus every computed
   metric — as JSON, or `?fmt=csv` for a spreadsheet. That is the hand-off point for later
   correlation work once enough nights exist.

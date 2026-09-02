@@ -139,6 +139,7 @@ async function openSession(id) {
     $('#inspect').classList.add('hidden');
     inspectId = null;
   }
+  disarmDelete();
   renderContext();
   renderEvents();
   drawTimeline(signals, currentEvents, oximetry.events || []);
@@ -353,12 +354,47 @@ function drawTimeline(signals, events, desaturations = []) {
 }
 
 $('#back').onclick = () => {
+  disarmDelete();
   ['#review', '#labeling', '#inspect'].forEach(s => $(s).classList.add('hidden'));
   inspectId = null;
   $('#session-list').classList.remove('hidden');
   announce();
   loadSessions();
 };
+/* ---------- delete a night ----------
+   Irreversible: the row, every child row, and the recorded audio all go. So the
+   button arms first and only deletes on a second, deliberate click, and disarms
+   again on a timeout or as soon as the operator navigates away. */
+let deleteArmed = false;
+let deleteTimer = null;
+
+const disarmDelete = () => {
+  clearTimeout(deleteTimer);
+  deleteArmed = false;
+  $('#delete-night').textContent = 'Delete night';
+  $('#delete-night').classList.remove('armed');
+};
+
+$('#delete-night').onclick = async () => {
+  if (!currentSession) return;
+  if (!deleteArmed) {
+    deleteArmed = true;
+    $('#delete-night').textContent = 'Confirm — permanent';
+    $('#delete-night').classList.add('armed');
+    announce('Deleting this night erases its audio, signals, candidates and labels for good. Click again to confirm.');
+    deleteTimer = setTimeout(() => { disarmDelete(); announce(); }, 8000);
+    return;
+  }
+  const doomed = currentSession.id;
+  disarmDelete();
+  try {
+    const result = await api(`/api/sessions/${doomed}`, {method: 'DELETE'});
+    currentSession = null;
+    $('#back').onclick();
+    announce(`Deleted night ${doomed.slice(0, 8)} and ${result.audio_chunks_removed} audio chunks.`);
+  } catch (error) { if (!(error instanceof AuthError)) announce(error.message); }
+};
+
 const runAnalysis = async (algorithm) => { try { announce(`Running ${algorithm} over the night…`);const result=await api(`/api/sessions/${currentSession.id}/analyze?algorithm=${encodeURIComponent(algorithm)}`,{method:'POST'});announce(`${result.algorithm_version}: ${result.events} candidates.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };
 $('#reanalyze').onclick = () => runAnalysis('dsp-v0.2.0');
 $('#garmin').onclick = async () => { try { announce('Fetching Garmin sleep and health signals…');const result=await api(`/api/sessions/${currentSession.id}/garmin/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});announce(`Imported ${result.imported} Garmin points. Re-run analysis to fuse them.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };

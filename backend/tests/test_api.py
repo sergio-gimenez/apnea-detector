@@ -343,3 +343,56 @@ def test_export_carries_context_and_metrics_for_every_night(tmp_path):
     assert lines[0].startswith("night_utc,tags,notes,status,")
     assert len(lines) == 2
     assert "sport|alone" in lines[1] and "did sport" in lines[1]
+
+
+def test_deleting_a_night_removes_its_rows_and_audio(tmp_path):
+    from apnea_api.models import AudioChunk, RespiratoryEvent, SignalPoint, SleepSession
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    db_url = f"sqlite:///{tmp_path / 'delete.db'}"
+    client = TestClient(create_app(tmp_path, db_url))
+    doomed, _ = _session_with_audio(client, minutes=10)
+    keeper, _ = _session_with_audio(client, minutes=5)
+    assert client.post(f"/api/sessions/{doomed}/signals", json={"points": [
+        {"timestamp_utc": datetime(2026, 8, 31, 0, 1, tzinfo=timezone.utc).isoformat(),
+         "signal_type": "spo2", "value": 95.0, "unit": "%", "source": "test"}
+    ]}).status_code == 200
+    # synthetic silence yields no candidates, so plant one to prove events go too
+    with sessionmaker(create_engine(db_url))() as db:
+        db.add(RespiratoryEvent(
+            session_id=doomed, start_offset_seconds=120.0, duration_seconds=25.0,
+            confidence=0.9, evidence_json="{}", algorithm_version="dsp-v0.2.0",
+        ))
+        db.commit()
+    assert len(client.get(f"/api/sessions/{doomed}/events").json()) == 1
+    assert len(client.get(f"/api/sessions/{doomed}/signals").json()) == 1
+
+    audio_dir = tmp_path / "audio" / doomed
+    assert audio_dir.is_dir() and any(audio_dir.iterdir())
+
+    result = client.delete(f"/api/sessions/{doomed}").json()
+    assert result["deleted"] == doomed and result["audio_chunks_removed"] == 2
+
+    assert client.get(f"/api/sessions/{doomed}").status_code == 404
+    assert client.delete(f"/api/sessions/{doomed}").status_code == 404
+    assert not audio_dir.exists()
+
+    # every child row goes with it, and the other night is untouched
+    engine = create_engine(db_url)
+    with sessionmaker(engine)() as db:
+        for model in (AudioChunk, SignalPoint, RespiratoryEvent):
+            assert db.scalars(select(model).where(model.session_id == doomed)).all() == []
+        assert db.get(SleepSession, keeper) is not None
+        assert db.scalars(select(AudioChunk).where(AudioChunk.session_id == keeper)).all() != []
+    assert (tmp_path / "audio" / keeper).is_dir()
+    assert [row["id"] for row in client.get("/api/sessions").json()] == [keeper]
+
+
+def test_delete_refuses_a_session_id_that_escapes_the_audio_store(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'escape.db'}"))
+    # a crafted id must never let a request reach outside the data directory,
+    # whether it is being written to or removed
+    for path in ("..", "%2e%2e", "../.."):
+        assert client.delete(f"/api/sessions/{path}").status_code in (400, 404, 405)
+    assert (tmp_path / "audio").is_dir()

@@ -42,20 +42,24 @@ class SleepSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # passive_deletes leaves the row-by-row work to the ON DELETE CASCADE the
+    # child tables already declare, so deleting a night is one statement rather
+    # than loading a hundred thousand signal points into the session first.
     chunks: Mapped[list[AudioChunk]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
     )
     signals: Mapped[list[SignalPoint]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
     )
     events: Mapped[list[RespiratoryEvent]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
     )
     architecture: Mapped[SleepArchitecture | None] = relationship(
-        back_populates="session", cascade="all, delete-orphan", uselist=False
+        back_populates="session", cascade="all, delete-orphan", uselist=False,
+        passive_deletes=True
     )
     review_items: Mapped[list[ReviewItem]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
     )
 
 

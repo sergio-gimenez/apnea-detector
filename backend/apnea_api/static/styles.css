@@ -108,3 +108,8 @@ button.ghost { background:transparent;color:var(--muted); }
 .tag-suggest button:hover { color:var(--cyan);border-color:var(--cyan);border-style:solid; }
 #context-notes { display:block;width:100%;margin-top:14px;padding:12px 13px;background:#0c1115;border:1px solid var(--line);color:var(--ink);font:14px/1.5 Arial,sans-serif;resize:vertical; }
 #context-notes:focus { outline:none;border-color:var(--cyan); }
+
+/* ---------- destructive action ---------- */
+button.danger { border-color:#5c3330;color:var(--red); }
+button.danger:hover { border-color:var(--red); }
+button.danger.armed { background:var(--red);border-color:var(--red);color:#12181d;font-weight:700; }

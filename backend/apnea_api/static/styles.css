@@ -34,7 +34,7 @@ button.ghost { background:transparent;color:var(--muted); }
 .label-buttons { display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0; }
 .label-buttons button { padding:16px 8px;font-weight:700; }
 .label-buttons button[data-label="pause"] { border-color:#5b4a7a; }
-#label-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px;cursor:pointer; }
+#label-wave, #inspect-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px;cursor:pointer; }
 .audio-tools { display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:8px 0 4px;font:12px 'DM Mono',monospace;color:var(--muted); }
 .audio-tools label { display:flex;align-items:center;gap:8px; }
 .audio-tools input[type=range] { accent-color:var(--cyan); }
@@ -76,3 +76,14 @@ button.ghost { background:transparent;color:var(--muted); }
 .sec-row { display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-top:1px solid var(--line); }
 .sec-row small { display:block;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;margin-top:4px; }
 #token-new { margin-top:16px; }
+
+/* ---------- direct review ---------- */
+.queue-head { display:flex;justify-content:space-between;align-items:center;margin-bottom:6px; }
+.queue-head .eyebrow { margin:0; }
+#events-sort { padding:6px 12px;font-size:11px; }
+.event.open { color:var(--cyan);background:#0c1418; }
+#inspect-title { font-size:24px;margin:6px 0 4px; }
+#inspect-evidence { margin-top:16px; }
+#inspect-status:not(:empty) { margin:10px 0 0;color:var(--cyan); }
+.review-buttons button.active { border-color:var(--cyan);color:var(--cyan); }
+#inspect-nav { display:flex;justify-content:space-between;margin-top:18px; }

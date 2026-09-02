@@ -257,3 +257,34 @@ def test_review_labelling_reveals_kind_and_scores(tmp_path):
     assert len(wave_data["envelope_dbfs"]) > 100
     assert len(wave_data["floor_dbfs"]) == len(wave_data["envelope_dbfs"])
     assert client.get(f"/api/review-items/{batch[0]['id']}/audio.wav").status_code == 200
+
+
+def test_event_waveform_matches_review_item_shape(tmp_path):
+    from apnea_api.models import RespiratoryEvent
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_url = f"sqlite:///{tmp_path / 'evwave.db'}"
+    client = TestClient(create_app(tmp_path, db_url))
+    session_id, _ = _session_with_audio(client, minutes=10)
+    with sessionmaker(create_engine(db_url))() as db:
+        db.add(
+            RespiratoryEvent(
+                session_id=session_id,
+                start_offset_seconds=120.0,
+                duration_seconds=25.0,
+                confidence=0.9,
+                evidence_json="{}",
+                algorithm_version="dsp-v0.2.0",
+            )
+        )
+        db.commit()
+
+    event_id = client.get(f"/api/sessions/{session_id}/events").json()[0]["id"]
+    wave = client.get(f"/api/events/{event_id}/waveform").json()
+    assert wave["sample_rate_hz"] == 20
+    assert len(wave["envelope_dbfs"]) == len(wave["floor_dbfs"]) > 100
+    assert wave["window"] == [120.0, 145.0]
+    assert isinstance(wave["bursts"], list) and isinstance(wave["spo2"], list)
+    assert client.get(f"/api/events/{event_id}/audio.wav").status_code == 200
+    assert client.get("/api/events/999999/waveform").status_code == 404

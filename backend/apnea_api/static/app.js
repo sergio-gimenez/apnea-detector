@@ -114,38 +114,123 @@ async function openSession(id) {
     ['Snoring', summary.snoring_burden_percent == null ? '—' : `${summary.snoring_burden_percent}%`],
     ['Snore bursts', summary.snore_bursts ?? '—']
   ].map(([label,value]) => `<div class="metric"><b>${value}</b><span>${label}</span></div>`).join('');
+  if (inspectId != null && !currentEvents.some(event => event.id === inspectId)) {
+    $('#inspect').classList.add('hidden');
+    inspectId = null;
+  }
   renderEvents();
   drawTimeline(signals, currentEvents, oximetry.events || []);
 }
 
+const QUEUE_SORT_KEY = 'apnea-queue-sort';
+let queueSort = 'time';
+try { queueSort = localStorage.getItem(QUEUE_SORT_KEY) || 'time'; } catch {}
+
+// currentEvents stays in API (time) order for the timeline; the queue and the
+// Prev/Next walk use this derived order.
+function sortedEvents() {
+  const copy = currentEvents.slice();
+  copy.sort(queueSort === 'confidence'
+    ? (a, b) => b.confidence - a.confidence
+    : (a, b) => a.start_offset_seconds - b.start_offset_seconds);
+  return copy;
+}
+
 function renderEvents() {
-  $('#events').innerHTML = currentEvents.length ? currentEvents.map(event => `
-    <div class="event" data-id="${event.id}">
+  const list = sortedEvents();
+  $('#events-sort').textContent = queueSort === 'confidence' ? 'sort: confidence ▾' : 'sort: time ▾';
+  $('#events').innerHTML = list.length ? list.map(event => `
+    <div class="event${event.id === inspectId ? ' open' : ''}" data-id="${event.id}">
       <b title="+${duration(event.start_offset_seconds)} into the night">${wallTime(atOffset(event.start_offset_seconds), false)}</b>
       <span>${event.duration_seconds.toFixed(0)} sec</span>
       <div><div class="confidence"><i style="width:${event.confidence*100}%"></i></div><small>${Math.round(event.confidence*100)}% confidence</small></div>
       <span class="tag">${event.review_status}</span>
     </div>`).join('') : '<p class="muted">No ≥10-second low-audio candidates detected.</p>';
-  document.querySelectorAll('.event').forEach(row => row.onclick = () => selectEvent(Number(row.dataset.id)));
+  document.querySelectorAll('.event').forEach(row => row.onclick = () => openInspect(Number(row.dataset.id)));
 }
 
-async function selectEvent(id) {
+/* ---------- direct (non-blind) review ----------
+   Same clip view as blind labelling (drawWaveform/attachBooster), but the
+   detector's marks are on from the start and the verdict buttons are the
+   existing confirmed / rejected / uncertain. */
+let inspectId = null;
+
+async function openInspect(id) {
   const event = currentEvents.find(item => item.id === id);
-  const evidence = Object.entries(event.evidence).map(([key,value]) => `<span>${key.replaceAll('_',' ')}</span><span>${value ?? 'n/a'}</span>`).join('');
-  $('#evidence').innerHTML = `
-    <p class="eyebrow">SUSPECTED RESPIRATORY EVENT</p><h2>${clock(event.start_offset_seconds)}</h2>
-    <div class="evidence-list">${evidence}</div>
-    <audio id="event-audio" controls preload="none"></audio>
-    <p class="hint">Candidate window ${clockRange(event.start_offset_seconds, event.duration_seconds)} · ${zoneLabel()}. Audio includes 30 s before and after.</p>
-    <div class="review-buttons">${['confirmed','rejected','uncertain'].map(status => `<button data-review="${status}">${status}</button>`).join('')}</div>`;
-  document.querySelectorAll('[data-review]').forEach(button => button.onclick = async () => {
-    const updated = await api(`/api/events/${event.id}/review`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:button.dataset.review})});
-    currentEvents[currentEvents.findIndex(item => item.id === id)] = updated;
-    renderEvents(); selectEvent(id);
-  });
-  const audioResponse = await fetch(`/api/events/${event.id}/audio.wav`);
-  if (audioResponse.ok) $('#event-audio').src = URL.createObjectURL(await audioResponse.blob());
+  if (!event) return;
+  inspectId = id;
+  renderEvents(); // highlight the open row in the queue
+  $('#labeling').classList.add('hidden');
+  $('#inspect').classList.remove('hidden');
+  $('#inspect').scrollIntoView({behavior: 'smooth', block: 'start'});
+  renderInspectMeta(event);
+  const order = sortedEvents();
+  const pos = order.findIndex(item => item.id === id);
+  $('#inspect-progress').textContent =
+    `Candidate ${pos + 1} of ${order.length} · ${wallTime(atOffset(event.start_offset_seconds))}`;
+  $('#inspect-help').textContent =
+    `Candidate window ${clockRange(event.start_offset_seconds, event.duration_seconds)} (${zoneLabel()}), plus 30 s of audio each side. The detector's marks are shown.`;
+  const audio = $('#inspect-audio');
+  audio.removeAttribute('src');
+  inspectView.data = null;
+  try {
+    const [blob, waveform] = await Promise.all([
+      authedBlob(`/api/events/${id}/audio.wav`),
+      api(`/api/events/${id}/waveform`).catch(error => { announce(error.message); return null; }),
+    ]);
+    if (inspectId !== id) return; // moved on while loading
+    audio.src = blob;
+    if (waveform) drawWaveform(inspectView, waveform, true);
+  } catch (error) { if (!(error instanceof AuthError)) announce(error.message); }
 }
+
+function renderInspectMeta(event) {
+  $('#inspect-title').textContent = clock(event.start_offset_seconds);
+  const evidence = Object.entries(event.evidence)
+    .map(([key, value]) => `<span>${key.replaceAll('_', ' ')}</span><span>${value ?? 'n/a'}</span>`).join('');
+  $('#inspect-evidence').innerHTML =
+    `<span>duration</span><span>${event.duration_seconds.toFixed(0)} s</span>` +
+    `<span>confidence</span><span>${Math.round(event.confidence * 100)}%</span>${evidence}`;
+  document.querySelectorAll('#inspect-buttons [data-review]').forEach(button =>
+    button.classList.toggle('active', button.dataset.review === event.review_status));
+  $('#inspect-status').textContent =
+    event.review_status === 'unreviewed' ? '' : `Marked ${event.review_status}.`;
+}
+
+document.querySelectorAll('#inspect-buttons [data-review]').forEach(button => {
+  button.onclick = async () => {
+    if (inspectId == null) return;
+    try {
+      const updated = await api(`/api/events/${inspectId}/review`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: button.dataset.review}),
+      });
+      const idx = currentEvents.findIndex(item => item.id === updated.id);
+      if (idx >= 0) currentEvents[idx] = updated;
+      renderEvents();
+      renderInspectMeta(updated); // refresh tag only — audio and waveform stay put
+    } catch (error) { if (!(error instanceof AuthError)) announce(error.message); }
+  };
+});
+
+const stepInspect = (delta) => {
+  const order = sortedEvents();
+  const next = order[order.findIndex(item => item.id === inspectId) + delta];
+  if (next) openInspect(next.id);
+};
+$('#inspect-prev').onclick = () => stepInspect(-1);
+$('#inspect-next').onclick = () => stepInspect(1);
+$('#inspect-close').onclick = () => {
+  $('#inspect').classList.add('hidden');
+  $('#inspect-audio').removeAttribute('src');
+  inspectId = null;
+  renderEvents();
+};
+$('#events-sort').onclick = () => {
+  queueSort = queueSort === 'time' ? 'confidence' : 'time';
+  try { localStorage.setItem(QUEUE_SORT_KEY, queueSort); } catch {}
+  renderEvents();
+};
 
 function drawTimeline(signals, events, desaturations = []) {
   const canvas = $('#timeline');
@@ -165,7 +250,13 @@ function drawTimeline(signals, events, desaturations = []) {
   draw(groups.audio_energy,'#58d6d0',-80,-10,28,height-38); draw(groups.spo2,'#f0ad4e',80,100,28,135); draw(groups.heart_rate,'#ff6b62',35,120,155,height-38); draw(groups.respiration_rate,'#88d498',6,30,155,height-38); draw(groups.snore_rate,'#ab80ff',0,40,155,height-38);
 }
 
-$('#back').onclick = () => { $('#review').classList.add('hidden');$('#session-list').classList.remove('hidden');announce();loadSessions(); };
+$('#back').onclick = () => {
+  ['#review', '#labeling', '#inspect'].forEach(s => $(s).classList.add('hidden'));
+  inspectId = null;
+  $('#session-list').classList.remove('hidden');
+  announce();
+  loadSessions();
+};
 const runAnalysis = async (algorithm) => { try { announce(`Running ${algorithm} over the night…`);const result=await api(`/api/sessions/${currentSession.id}/analyze?algorithm=${encodeURIComponent(algorithm)}`,{method:'POST'});announce(`${result.algorithm_version}: ${result.events} candidates.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };
 $('#reanalyze').onclick = () => runAnalysis('dsp-v0.2.0');
 $('#garmin').onclick = async () => { try { announce('Fetching Garmin sleep and health signals…');const result=await api(`/api/sessions/${currentSession.id}/garmin/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});announce(`Imported ${result.imported} Garmin points. Re-run analysis to fuse them.`);await openSession(currentSession.id); } catch(error){announce(error.message)} };
@@ -183,47 +274,62 @@ const authedBlob = async (url) => {
    Overnight phone audio is quiet and wide-range: snores near 0 dBFS, the breaths
    between them near the noise floor. A gain stage lifts the whole clip past 100 %
    volume; an optional compressor pulls the quiet parts up without the snores
-   getting painful. All client-side, the stored audio is untouched. */
+   getting painful. All client-side, the stored audio is untouched.
+
+   attachBooster() binds one such chain to an <audio> + its slider/checkbox, so the
+   blind-labelling panel and the direct-review panel share the exact same code. The
+   preferred boost is one shared localStorage value across both. */
 const GAIN_KEY = 'apnea-label-gain';
-let audioChain = null;
 
-function ensureAudioChain() {
-  if (audioChain || audioChain === false) return audioChain;
-  try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new Ctx();
-    const source = ctx.createMediaElementSource($('#label-audio'));
-    const gain = ctx.createGain();
-    const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -40; comp.knee.value = 25; comp.ratio.value = 6;
-    comp.attack.value = 0.004; comp.release.value = 0.18;
-    source.connect(gain);
-    audioChain = {ctx, gain, comp};
-    applyAudioChain();
-  } catch (error) {
-    audioChain = false; // unsupported: fall back to the native element
-  }
-  return audioChain;
-}
+function attachBooster(audio, gainInput, gainOut, compressInput) {
+  try { const saved = localStorage.getItem(GAIN_KEY); if (saved) gainInput.value = saved; } catch {}
+  const state = {chain: null};
 
-function applyAudioChain() {
-  if (!audioChain) return;
-  const {ctx, gain, comp} = audioChain;
-  try { gain.disconnect(); } catch {}
-  try { comp.disconnect(); } catch {}
-  if ($('#label-compress').checked) { gain.connect(comp); comp.connect(ctx.destination); }
-  else { gain.connect(ctx.destination); }
-}
+  const applyGain = () => {
+    const value = Number(gainInput.value);
+    gainOut.textContent = `${value}×`;
+    if (state.chain) state.chain.gain.gain.value = value;
+    try { localStorage.setItem(GAIN_KEY, gainInput.value); } catch {}
+  };
+  const applyChain = () => {
+    if (!state.chain) return;
+    const {ctx, gain, comp} = state.chain;
+    try { gain.disconnect(); } catch {}
+    try { comp.disconnect(); } catch {}
+    if (compressInput.checked) { gain.connect(comp); comp.connect(ctx.destination); }
+    else { gain.connect(ctx.destination); }
+  };
+  const ensureChain = () => {
+    if (state.chain || state.chain === false) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const source = ctx.createMediaElementSource(audio); // once per element, ever
+      const gain = ctx.createGain();
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -40; comp.knee.value = 25; comp.ratio.value = 6;
+      comp.attack.value = 0.004; comp.release.value = 0.18;
+      source.connect(gain);
+      state.chain = {ctx, gain, comp};
+      applyChain();
+    } catch (error) {
+      state.chain = false; // unsupported: fall back to the native element
+    }
+  };
 
-function applyGain() {
-  const value = Number($('#label-gain').value);
-  $('#label-gain-val').textContent = `${value}×`;
-  if (audioChain) audioChain.gain.gain.value = value;
-  try { localStorage.setItem(GAIN_KEY, value); } catch {}
+  applyGain();
+  gainInput.oninput = applyGain;
+  compressInput.onchange = applyChain;
+  audio.addEventListener('play', () => {
+    ensureChain();
+    if (state.chain) { state.chain.ctx.resume(); applyGain(); }
+  });
 }
 
 async function openLabeling(fresh) {
   // the panel always opens: a button that silently does nothing reads as broken
+  $('#inspect').classList.add('hidden');
+  if (inspectId != null) { inspectId = null; renderEvents(); }
   $('#labeling').classList.remove('hidden');
   $('#labeling').scrollIntoView({behavior:'smooth', block:'start'});
   try {
@@ -264,7 +370,7 @@ async function renderClip() {
     $('#label-buttons').classList.add('hidden');
     showClipMedia(false);
     $('#label-audio').removeAttribute('src');
-    waveData = null;
+    labelView.data = null;
     return;
   }
   const item = batch[batchIndex];
@@ -279,7 +385,7 @@ async function renderClip() {
     api(`/api/review-items/${item.id}/waveform`).catch(error => { announce(error.message); return null; }),
   ]);
   audio.src = blob;
-  if (waveform) drawWaveform(waveform, false);
+  if (waveform) drawWaveform(labelView, waveform, false);
 }
 
 async function labelClip(label) {
@@ -308,48 +414,53 @@ async function reveal(item, label) {
   $('#label-buttons').classList.add('hidden');
   $('#label-wave-hint').textContent = 'Now with the detector shown: shaded = the window it judged, purple = snore bursts it found, dashed = its burst threshold, amber = SpO₂.';
   try {
-    drawWaveform(await api(`/api/review-items/${item.id}/waveform`), true);
+    drawWaveform(labelView, await api(`/api/review-items/${item.id}/waveform`), true);
   } catch (error) { announce(error.message); }
   await renderStats();
 }
 
-let waveData = null;      // last waveform payload, so the playhead can redraw it
-let waveAnnotated = false; // whether to draw the detector's own marks (post-label only)
-let waveToken = 0;        // invalidates the animation loop of a previous clip
+/* A clip view binds the renderer to one {canvas, audio} pair. The blind panel and
+   the direct-review panel each own one; only one is on screen at a time, tracked
+   by activeView so a resize can redraw it. `annotated` shows the detector's marks
+   (off while blind-labelling, on everywhere else). */
+let activeView = null;
 
-function drawWaveform(data, annotated = false) {
-  waveData = data;
-  waveAnnotated = annotated;
-  const token = ++waveToken;
-  renderWave();
-  const audio = $('#label-audio');
-  const follow = () => renderWave(audio.currentTime);
+function drawWaveform(view, data, annotated = false) {
+  activeView = view;
+  view.data = data;
+  view.annotated = annotated;
+  const token = view.token = (view.token || 0) + 1;
+  renderWave(view);
+  const audio = view.audio;
+  const follow = () => renderWave(view, audio.currentTime);
   audio.ontimeupdate = audio.onseeked = audio.onpause = audio.onended = follow;
   audio.onplay = () => {
     const step = () => {
-      if (token !== waveToken || audio.paused || audio.ended) return;
-      renderWave(audio.currentTime);
+      if (token !== view.token || audio.paused || audio.ended) return;
+      renderWave(view, audio.currentTime);
       requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
   };
   // click the trace to jump the audio there
-  $('#label-wave').onclick = (clickEvent) => {
-    const box = $('#label-wave').getBoundingClientRect();
+  view.canvas.onclick = (clickEvent) => {
+    const box = view.canvas.getBoundingClientRect();
     const span = Math.max(data.end_offset_seconds - data.start_offset_seconds, 0.001);
     const seconds = (clickEvent.clientX - box.left - 8) / Math.max(box.width - 16, 1) * span;
     audio.currentTime = Math.max(0, Math.min(seconds, audio.duration || span));
-    renderWave(audio.currentTime);
+    renderWave(view, audio.currentTime);
   };
 }
 
 // playSeconds: position of the audio scrubber, in seconds from the clip start
-function renderWave(playSeconds = null) {
-  const data = waveData;
-  const canvas = $('#label-wave');
+function renderWave(view, playSeconds = null) {
+  const data = view && view.data;
+  const canvas = view && view.canvas;
+  if (!data || !canvas) return;
+  const annotated = view.annotated;
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth, height = canvas.clientHeight;
-  if (!data || !width || !height) return;
+  if (!width || !height) return;
   canvas.width = width * ratio; canvas.height = height * ratio;
   const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, width, height);
@@ -367,7 +478,7 @@ function renderWave(playSeconds = null) {
   // the listener judges the sound, not the detector: no suspected window, no burst
   // detections, no SpO₂. reveal() turns them on.
   const [ws, we] = data.window;
-  if (waveAnnotated) {
+  if (annotated) {
     ctx.fillStyle = 'rgba(171,128,255,.14)';
     ctx.fillRect(x(ws), 10, Math.max(2, x(we) - x(ws)), height - 34);
     data.bursts.forEach(burst => {
@@ -386,10 +497,10 @@ function renderWave(playSeconds = null) {
     ctx.stroke(); ctx.setLineDash([]);
   };
   line(data.floor_dbfs, '#4a5860');
-  if (waveAnnotated) line(data.floor_dbfs.map(value => value + data.burst_threshold_db), '#6c7a84', [4, 4]);
+  if (annotated) line(data.floor_dbfs.map(value => value + data.burst_threshold_db), '#6c7a84', [4, 4]);
   line(data.envelope_dbfs, '#58d6d0');
 
-  if (waveAnnotated && data.spo2.length > 1) {
+  if (annotated && data.spo2.length > 1) {
     const lows = Math.min(...data.spo2.map(p => p.value)) - 1;
     const highs = Math.max(...data.spo2.map(p => p.value)) + 1;
     ctx.strokeStyle = '#f0ad4e'; ctx.lineWidth = 1.6; ctx.beginPath();
@@ -414,7 +525,7 @@ function renderWave(playSeconds = null) {
   }
 
   // where the window in question sits, in clip seconds
-  if (waveAnnotated) {
+  if (annotated) {
     ctx.fillStyle = '#b79bff';
     ctx.fillText(`window ${(ws - t0).toFixed(1)}–${(we - t0).toFixed(1)}s`, Math.min(x(ws) + 4, width - 150), 20);
   }
@@ -447,17 +558,10 @@ document.querySelectorAll('[data-label]').forEach(button => {
   button.onclick = () => labelClip(button.dataset.label);
 });
 
-try {
-  const saved = localStorage.getItem(GAIN_KEY);
-  if (saved) $('#label-gain').value = saved;
-} catch {}
-$('#label-gain-val').textContent = `${Number($('#label-gain').value)}×`;
-$('#label-gain').oninput = applyGain;
-$('#label-compress').onchange = applyAudioChain;
-$('#label-audio').addEventListener('play', () => {
-  const chain = ensureAudioChain();
-  if (chain) { chain.ctx.resume(); applyGain(); }
-});
+const labelView = {canvas: $('#label-wave'), audio: $('#label-audio')};
+const inspectView = {canvas: $('#inspect-wave'), audio: $('#inspect-audio')};
+attachBooster($('#label-audio'), $('#label-gain'), $('#label-gain-val'), $('#label-compress'));
+attachBooster($('#inspect-audio'), $('#inspect-gain'), $('#inspect-gain-val'), $('#inspect-compress'));
 
 $('#label-next').onclick = () => { batchIndex += 1; renderClip(); };
 $('#label').onclick = () => openLabeling(false);
@@ -477,7 +581,7 @@ $('#tz').onclick = () => {
   } catch { announce(`Unknown timezone: ${next}`); }
 };
 
-window.addEventListener('resize', () => { if (currentSession) openSession(currentSession.id); renderWave(); });
+window.addEventListener('resize', () => { if (currentSession) openSession(currentSession.id); if (activeView) renderWave(activeView); });
 
 /* ---------- sign-in gate ---------- */
 const authError = (message = '') => { $('#auth-error').textContent = message; };

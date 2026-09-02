@@ -450,6 +450,25 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             db,
         )
 
+    @app.get("/api/events/{event_id}/waveform")
+    def event_waveform(
+        event_id: int, before: float = 30, after: float = 30, db: Session = Depends(get_db)
+    ) -> dict:
+        event = db.get(RespiratoryEvent, event_id)
+        if not event:
+            raise HTTPException(404, "Event not found")
+        session = get_session_or_404(event.session_id, db)
+        if not (0 <= before <= 120 and 0 <= after <= 120):
+            raise HTTPException(422, "before and after must each be between 0 and 120 seconds")
+        return waveform_for(
+            session,
+            event.start_offset_seconds - max(0, before),
+            event.start_offset_seconds + event.duration_seconds + max(0, after),
+            event.start_offset_seconds,
+            event.start_offset_seconds + event.duration_seconds,
+            db,
+        )
+
     def clip_response(
         session: SleepSession, start_seconds: float, end_seconds: float, db: Session
     ) -> StreamingResponse:

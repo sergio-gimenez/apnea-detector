@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nocturne Review</title>
-    <link rel="stylesheet" href="/styles.css?v=10">
+    <link rel="stylesheet" href="/styles.css?v=11">
   </head>
   <body>
     <header>
@@ -129,18 +129,48 @@
           <div id="label-stats" class="stats"></div>
         </section>
 
-        <section class="review-grid">
-          <div class="panel">
-            <p class="eyebrow">CANDIDATE QUEUE</p>
-            <div id="events"></div>
+        <section id="inspect" class="panel hidden">
+          <div class="label-head">
+            <div>
+              <p class="eyebrow">DIRECT REVIEW</p>
+              <h2 id="inspect-progress">Candidate</h2>
+            </div>
+            <div class="actions">
+              <button id="inspect-close" class="ghost">Close</button>
+            </div>
           </div>
-          <aside class="panel evidence-panel" id="evidence">
-            <p class="eyebrow">EVIDENCE</p>
-            <p class="muted">Select a suspected respiratory event.</p>
-          </aside>
+          <h3 id="inspect-title"></h3>
+          <p class="hint" id="inspect-help"></p>
+          <audio id="inspect-audio" controls preload="auto"></audio>
+          <div class="audio-tools">
+            <label>Volume boost <input id="inspect-gain" type="range" min="1" max="12" step="0.5" value="4"></label>
+            <output id="inspect-gain-val">4×</output>
+            <label class="chk"><input id="inspect-compress" type="checkbox" checked> lift quiet parts</label>
+          </div>
+          <canvas id="inspect-wave" height="200"></canvas>
+          <p class="hint">Cyan: loudness envelope. Grey: local floor. Dashed: snore-burst threshold. Purple: detected bursts and the shaded window. Amber: SpO₂. Ticks mark clip seconds; the white marker follows the audio.</p>
+          <div id="inspect-evidence" class="evidence-list"></div>
+          <div id="inspect-buttons" class="review-buttons">
+            <button data-review="confirmed">confirmed</button>
+            <button data-review="rejected">rejected</button>
+            <button data-review="uncertain">uncertain</button>
+          </div>
+          <p class="hint" id="inspect-status"></p>
+          <div id="inspect-nav">
+            <button id="inspect-prev" class="ghost">← Prev</button>
+            <button id="inspect-next" class="ghost">Next →</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="queue-head">
+            <p class="eyebrow">CANDIDATE QUEUE</p>
+            <button id="events-sort" class="ghost">sort: time ▾</button>
+          </div>
+          <div id="events"></div>
         </section>
       </section>
     </main>
-    <script src="/app.js?v=10"></script>
+    <script src="/app.js?v=11"></script>
   </body>
 </html>

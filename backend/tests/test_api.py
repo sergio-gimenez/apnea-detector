@@ -1,4 +1,5 @@
 import io
+import json
 import uuid
 import wave
 from datetime import datetime, timedelta, timezone
@@ -396,3 +397,101 @@ def test_delete_refuses_a_session_id_that_escapes_the_audio_store(tmp_path):
     for path in ("..", "%2e%2e", "../.."):
         assert client.delete(f"/api/sessions/{path}").status_code in (400, 404, 405)
     assert (tmp_path / "audio").is_dir()
+
+
+def test_confirmed_casebook_gathers_both_kinds_of_confirmation(tmp_path):
+    """Direct confirmations and blind "pause" labels both land in the casebook,
+    a direct rejection keeps an event out even when a blind label says pause,
+    and everything is grouped under its night newest-first."""
+    from apnea_api.models import RespiratoryEvent, ReviewItem
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_url = f"sqlite:///{tmp_path / 'casebook.db'}"
+    client = TestClient(create_app(tmp_path, db_url))
+    older, _ = _session_with_audio(client, minutes=10)
+    newer = str(uuid.uuid4())
+    later = datetime(2026, 9, 1, 0, 0, 0, tzinfo=timezone.utc)
+    client.post(
+        "/api/sessions",
+        json={
+            "id": newer,
+            "device_id": "test phone",
+            "started_at_utc": later.isoformat(),
+            "started_at_monotonic_ns": 0,
+            "sample_rate": 16_000,
+        },
+    )
+
+    with sessionmaker(create_engine(db_url))() as db:
+        planted = [
+            # (session, offset, duration, review_status, blind label, spo2 drop)
+            (older, 100.0, 18.0, "confirmed", None, 4.5),
+            (older, 200.0, 34.0, "unreviewed", "pause", None),
+            (older, 300.0, 22.0, "rejected", "pause", None),  # direct rejection wins
+            (older, 400.0, 15.0, "unreviewed", "no_pause", None),
+            (older, 500.0, 12.0, "uncertain", None, None),
+            (newer, 60.0, 41.0, "confirmed", "pause", 6.0),
+        ]
+        for session_id, start, span, status, label, drop in planted:
+            event = RespiratoryEvent(
+                session_id=session_id,
+                start_offset_seconds=start,
+                duration_seconds=span,
+                confidence=0.8,
+                evidence_json=json.dumps({"spo2_drop": drop} if drop else {}),
+                algorithm_version="dsp-v0.2.0",
+                review_status=status,
+            )
+            db.add(event)
+            db.flush()
+            if label:
+                db.add(
+                    ReviewItem(
+                        session_id=session_id,
+                        batch="batch-1",
+                        position=0,
+                        kind="candidate",
+                        event_id=event.id,
+                        start_offset_seconds=start,
+                        duration_seconds=span,
+                        label=label,
+                    )
+                )
+        db.commit()
+
+    book = client.get("/api/confirmed").json()
+
+    assert book["total_episodes"] == 3
+    assert book["nights_with_episodes"] == 2 and book["nights_recorded"] == 2
+    assert [night["session"]["id"] for night in book["nights"]] == [newer, older]
+
+    kept = {
+        episode["start_offset_seconds"]: episode
+        for night in book["nights"]
+        for episode in night["episodes"]
+    }
+    assert set(kept) == {100.0, 200.0, 60.0}
+    assert kept[100.0]["confirmed_via"] == ["direct review"]
+    assert kept[200.0]["confirmed_via"] == ["blind listen"]
+    assert kept[60.0]["confirmed_via"] == ["direct review", "blind listen"]
+
+    assert book["longest_seconds"] == 41.0
+    assert book["median_seconds"] == 34.0
+    assert book["episodes_over_20s"] == 2 and book["episodes_over_30s"] == 2
+    assert book["largest_spo2_drop"] == 6.0
+    assert book["blind_confirmed"] == 2
+
+    # the clip endpoints the casebook links to work for a gathered episode
+    episode_id = kept[100.0]["id"]
+    assert client.get(f"/api/events/{episode_id}/audio.wav").status_code == 200
+    assert client.get(f"/api/events/{episode_id}/waveform").json()["window"] == [100.0, 118.0]
+
+
+def test_confirmed_casebook_is_empty_before_anything_is_reviewed(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'empty.db'}"))
+    _session_with_audio(client, minutes=5)
+    book = client.get("/api/confirmed").json()
+    assert book["total_episodes"] == 0 and book["nights"] == []
+    assert book["nights_recorded"] == 1
+    assert book["median_seconds"] is None and book["largest_spo2_drop"] is None

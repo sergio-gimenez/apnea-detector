@@ -41,6 +41,11 @@ do not install a debug APK over an Obtainium release.
 - `DELETE /api/sessions/{id}` erases a night for good: its row, every child row via
   `ON DELETE CASCADE`, and the recorded audio on disk. The dashboard button arms on the
   first click and only deletes on a second. There is no soft-delete or bin.
+- **Confirmed casebook**: `GET /api/confirmed` gathers every episode the operator stood
+  behind — marked `confirmed` in direct review, or labelled `pause` in a blinded batch —
+  out of its night and into one cross-night list, keeping the loudness chart and the audio
+  for each. A direct `rejected` overrides a blind `pause`. The dashboard renders it as a
+  page built to be shown to somebody else (a doctor, family), and it prints to A4.
 - `GET /api/export` returns every night as one flat record — context plus every computed
   metric — as JSON, or `?fmt=csv` for a spreadsheet. That is the hand-off point for later
   correlation work once enough nights exist.

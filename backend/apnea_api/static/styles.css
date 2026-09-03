@@ -113,3 +113,52 @@ button.ghost { background:transparent;color:var(--muted); }
 button.danger { border-color:#5c3330;color:var(--red); }
 button.danger:hover { border-color:var(--red); }
 button.danger.armed { background:var(--red);border-color:var(--red);color:#12181d;font-weight:700; }
+
+/* ---------- the confirmed casebook ---------- */
+.casebook-bar { display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:36px;padding:20px 22px;border:1px solid var(--purple);background:rgba(171,128,255,.06); }
+.casebook-bar .hint { margin:0;max-width:560px; }
+#casebook-notice:not(:empty) { margin:0 0 16px;padding:12px 16px;border-left:3px solid var(--amber);background:#2a2115;color:#f4d5a2; }
+#casebook-metrics { margin-bottom:12px; }
+#casebook-disclaimer { margin:0 0 24px;max-width:760px; }
+.night-group { margin-bottom:18px; }
+.night-head { display:flex;justify-content:space-between;align-items:start;gap:18px;margin-bottom:14px; }
+.night-head h2 { margin:0;font-size:26px; }
+.night-notes { color:var(--muted);font-size:13px;margin:12px 0 0;max-width:760px; }
+.episodes { margin-top:8px; }
+.episode-row { display:grid;grid-template-columns:200px 80px 110px 1fr 130px;gap:12px;align-items:center;padding:14px 4px;border-top:1px solid var(--line);cursor:pointer; }
+.episode-row:hover { color:var(--cyan); }
+.episode-row.open { color:var(--purple); }
+.episode-row b { font:500 14px 'DM Mono',monospace; }
+.episode-row .drop { font:11px 'DM Mono',monospace;color:var(--amber); }
+.episode-row .via { font:10px 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--muted); }
+.episode-row .play { font:11px 'DM Mono',monospace;color:var(--muted);text-align:right; }
+.episode-row:hover .play, .episode-row.open .play { color:inherit; }
+.episode-panel { margin:0 0 18px;border-color:var(--purple); }
+#episode-wave { width:100%;height:200px;background:#0b1014;border:1px solid #202a31;margin:14px 0 8px;cursor:pointer; }
+@media(max-width:800px){ .casebook-bar{display:block}.casebook-bar button{margin-top:14px}.episode-row{grid-template-columns:1fr auto;row-gap:4px}.episode-row .via,.episode-row .play{display:none} }
+
+/* ---------- printing the casebook ----------
+   A doctor keeps paper, not a tab. Print drops the chrome and the interactive
+   controls, flattens the dark theme to ink, and keeps each night whole on a page.
+   Whichever clip chart is open on screen prints with it; the rest are audio-only
+   by nature and print as their row. */
+@media print {
+  body { background:#fff;color:#000;background-image:none; }
+  header, #auth, #security, #session-list, #review, .actions, .audio-tools,
+  audio, .text-button, #casebook-notice { display:none!important; }
+  main { width:auto;margin:0; }
+  .panel, .night-group, .episode-panel { background:#fff;border:1px solid #bbb;padding:16px;break-inside:avoid; }
+  h1 { font-size:32px;color:#000; }
+  h1 em, .eyebrow, .episode-row b { color:#000; }
+  .lede, .hint, .muted, .night-notes, .episode-row .via { color:#333; }
+  .metric b { color:#000; }
+  .chip { color:#000;border-color:#888; }
+  /* A4 is under the 800px breakpoint, so the narrow rules would otherwise drop
+     the one column a reader most needs: how each episode came to be confirmed. */
+  .episode-row { color:#000;cursor:auto;border-top:1px solid #ddd;grid-template-columns:210px 90px 110px 1fr; }
+  .episode-row .via { display:block; }
+  .episode-row .play, [data-open-night] { display:none!important; }
+  #casebook-metrics { background:#fff;border-color:#bbb; }
+  #casebook-metrics .metric { background:#fff;border:0; }
+  #episode-wave { border:1px solid #bbb; }
+}

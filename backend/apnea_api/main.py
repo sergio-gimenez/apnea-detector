@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, delete, event, func, inspect, select, text
+from sqlalchemy import create_engine, delete, event, func, inspect, or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .analysis import (
@@ -892,6 +892,101 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
     @app.get("/api/sessions/{session_id}/summary")
     def summary(session_id: str, db: Session = Depends(get_db)) -> dict:
         return build_summary(get_session_or_404(session_id, db), db)
+
+    # ---------- the confirmed casebook ----------
+    # Screening output is a pile of candidates; what is worth showing a clinician is
+    # the subset a human listened to and stood behind. Two routes get an event there,
+    # and they are not equal evidence, so the payload names which one applied:
+    #   * direct review  — judged with the detector's marks and SpO₂ on screen
+    #   * blind listen   — labelled "pause" in a blinded batch, without knowing the
+    #                      detector had flagged the clip, so free of agreement bias
+    # A direct "rejected" is the operator's most deliberate judgement, made with all
+    # the evidence visible, so it overrides a blind pause rather than the other way.
+    def confirmed_events(db: Session) -> list[tuple[RespiratoryEvent, list[str]]]:
+        blind = {
+            event_id
+            for (event_id,) in db.execute(
+                select(ReviewItem.event_id).where(
+                    ReviewItem.event_id.is_not(None), ReviewItem.label == "pause"
+                )
+            )
+        }
+        rows = db.scalars(
+            select(RespiratoryEvent)
+            .where(
+                RespiratoryEvent.review_status != "rejected",
+                or_(
+                    RespiratoryEvent.review_status == "confirmed",
+                    RespiratoryEvent.id.in_(blind),
+                ),
+            )
+            .order_by(RespiratoryEvent.start_offset_seconds)
+        )
+        out = []
+        for row in rows:
+            via = []
+            if row.review_status == "confirmed":
+                via.append("direct review")
+            if row.id in blind:
+                via.append("blind listen")
+            out.append((row, via))
+        return out
+
+    @app.get("/api/confirmed")
+    def confirmed_casebook(db: Session = Depends(get_db)) -> dict:
+        """Every episode the operator stood behind, newest night first.
+
+        Grouped by night because that is how it gets talked through: the night, its
+        context, then the episodes inside it. Each episode keeps its event id, so the
+        existing /api/events/{id}/audio.wav and /waveform serve the clip and the chart
+        with no second copy of that logic.
+        """
+        sessions = {
+            row.id: row
+            for row in db.scalars(select(SleepSession).order_by(SleepSession.started_at_utc.desc()))
+        }
+        grouped: dict[str, list[dict]] = {}
+        for episode, via in confirmed_events(db):
+            payload = _event_json(episode)
+            payload["session_id"] = episode.session_id
+            payload["confirmed_via"] = via
+            grouped.setdefault(episode.session_id, []).append(payload)
+
+        nights = []
+        for session_id, episodes in grouped.items():
+            session = sessions.get(session_id)
+            if session is None:  # deleted mid-request
+                continue
+            nights.append({"session": _session_json(session), "episodes": episodes})
+        nights.sort(key=lambda night: night["session"]["started_at_utc"], reverse=True)
+
+        episodes = [episode for night in nights for episode in night["episodes"]]
+        drops = [
+            episode["evidence"].get("spo2_drop")
+            for episode in episodes
+            if episode["evidence"].get("spo2_drop")
+        ]
+        return {
+            "total_episodes": len(episodes),
+            "nights_with_episodes": len(nights),
+            "nights_recorded": len(sessions),
+            "longest_seconds": round(max((e["duration_seconds"] for e in episodes), default=0), 1),
+            "median_seconds": round(
+                float(np.median([e["duration_seconds"] for e in episodes])), 1
+            )
+            if episodes
+            else None,
+            "episodes_over_20s": sum(e["duration_seconds"] >= 20 for e in episodes),
+            "episodes_over_30s": sum(e["duration_seconds"] >= 30 for e in episodes),
+            "largest_spo2_drop": round(max(drops), 1) if drops else None,
+            "blind_confirmed": sum("blind listen" in e["confirmed_via"] for e in episodes),
+            "nights": nights,
+            "disclaimer": (
+                "Episodes a single non-clinician listener judged to contain a pause in "
+                "breathing, from phone audio and a consumer wearable. Not polysomnography, "
+                "not an apnea-hypopnea index, and not a diagnosis."
+            ),
+        }
 
     # One flat record per night — the operator's context plus every computed metric.
     # This is the hand-off point for later correlation work (a notebook, or an LLM).

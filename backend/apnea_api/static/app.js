@@ -30,7 +30,8 @@ const shortZone = () => {
   } catch { return zone; }
 };
 const zoneLabel = () => `${zone} (${shortZone()})`;
-const atOffset = (seconds) => new Date(Date.parse(currentSession.started_at_utc) + seconds * 1000);
+const atOffsetOf = (startIso, seconds) => new Date(Date.parse(startIso) + seconds * 1000);
+const atOffset = (seconds) => atOffsetOf(currentSession.started_at_utc, seconds);
 const wallTime = (date, withSeconds = true) => date.toLocaleTimeString('en-GB',
   {hour: '2-digit', minute: '2-digit', ...(withSeconds ? {second: '2-digit'} : {}), timeZone: zone});
 const wallDay = (date) => date.toLocaleDateString('en-GB',
@@ -334,6 +335,159 @@ $('#events-sort').onclick = () => {
   try { localStorage.setItem(QUEUE_SORT_KEY, queueSort); } catch {}
   renderEvents();
 };
+
+/* ---------- the confirmed casebook ----------
+   The night view is for judging candidates; this is for the conversation that
+   follows one — a doctor, or family who have only ever heard the snoring from the
+   next room. So it drops every candidate the operator did not stand behind, pulls
+   the survivors out of their nights into one list, and keeps what made them
+   convincing in the first place: the loudness chart and the audio.
+
+   Each night is a group, because an episode only means something with its night
+   around it (how long, what the SpO₂ did, what was going on that day). Clicking an
+   episode moves the single #episode panel directly under that row, so the clip
+   opens where the eye already is instead of somewhere else on the page. */
+let casebook = null;
+let openEpisodeId = null;
+
+const casebookNotice = (message = '') => { $('#casebook-notice').textContent = message; };
+// a cross-night list always shows the day: nights start one day and end the next
+const episodeClock = (startIso, seconds) => {
+  const at = atOffsetOf(startIso, seconds);
+  return `${wallDay(at)} ${wallTime(at)}`;
+};
+
+async function openCasebook() {
+  ['#session-list', '#review', '#labeling', '#inspect', '#security'].forEach(view => $(view).classList.add('hidden'));
+  $('#casebook').classList.remove('hidden');
+  $('#casebook-tz').textContent = `🕓 ${shortZone()}`;
+  closeEpisode();
+  casebookNotice('Gathering confirmed episodes…');
+  try {
+    casebook = await api('/api/confirmed');
+    casebookNotice();
+    renderCasebook();
+  } catch (error) {
+    if (!(error instanceof AuthError)) casebookNotice(error.message);
+  }
+}
+
+function renderCasebook() {
+  if (!casebook) return;
+  $('#casebook-disclaimer').textContent = casebook.disclaimer;
+  $('#casebook-metrics').innerHTML = [
+    ['Episodes', casebook.total_episodes],
+    ['Nights affected', `${casebook.nights_with_episodes}/${casebook.nights_recorded}`],
+    ['Longest', casebook.longest_seconds ? duration(casebook.longest_seconds) : '—'],
+    ['Typical', casebook.median_seconds == null ? '—' : `${casebook.median_seconds}s`],
+    ['Over 20s', casebook.episodes_over_20s],
+    ['Over 30s', casebook.episodes_over_30s],
+    ['Biggest SpO₂ drop', casebook.largest_spo2_drop == null ? '—' : `${casebook.largest_spo2_drop}%`],
+    ['Heard blind', casebook.blind_confirmed],
+  ].map(([label, value]) => `<div class="metric"><b>${value}</b><span>${label}</span></div>`).join('');
+
+  $('#casebook-nights').innerHTML = casebook.nights.length ? casebook.nights.map(night => {
+    const session = night.session;
+    const started = new Date(session.started_at_utc);
+    return `
+    <section class="panel night-group">
+      <div class="night-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(wallDay(started).toUpperCase())} · ${escapeHtml(started.toLocaleDateString('en-GB', {year: 'numeric', month: 'long', day: 'numeric', timeZone: zone}))}</p>
+          <h2>${night.episodes.length} confirmed episode${night.episodes.length === 1 ? '' : 's'}</h2>
+        </div>
+        <button class="ghost" data-open-night="${session.id}">Open this night ▸</button>
+      </div>
+      ${session.tags && session.tags.length
+        ? `<div class="chips">${session.tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+      ${session.notes ? `<p class="night-notes">${escapeHtml(session.notes)}</p>` : ''}
+      <div class="episodes">
+        ${night.episodes.map(episode => `
+          <div class="episode-row${episode.id === openEpisodeId ? ' open' : ''}" data-episode="${episode.id}" data-start="${escapeHtml(session.started_at_utc)}">
+            <b>${escapeHtml(episodeClock(session.started_at_utc, episode.start_offset_seconds))}</b>
+            <span>${episode.duration_seconds.toFixed(0)} sec</span>
+            <span class="drop">${episode.evidence.spo2_drop ? `SpO₂ −${episode.evidence.spo2_drop}%` : ''}</span>
+            <span class="via">${episode.confirmed_via.map(escapeHtml).join(' + ')}</span>
+            <span class="play">▶ chart + audio</span>
+          </div>`).join('')}
+      </div>
+    </section>`;
+  }).join('') : `<p class="muted">Nothing confirmed yet. Open a night, listen to a candidate, and mark it <em>confirmed</em> — or label a blinded batch — and it lands here.</p>`;
+
+  document.querySelectorAll('[data-open-night]').forEach(button => {
+    button.onclick = (clickEvent) => {
+      clickEvent.stopPropagation();
+      $('#casebook').classList.add('hidden');
+      openSession(button.dataset.openNight).catch(error => announce(error.message));
+    };
+  });
+  document.querySelectorAll('.episode-row').forEach(row => {
+    row.onclick = () => openEpisode(Number(row.dataset.episode), row.dataset.start, row);
+  });
+  // the open panel was just detached by the innerHTML rewrite — put it back
+  if (openEpisodeId != null) {
+    const row = document.querySelector(`.episode-row[data-episode="${openEpisodeId}"]`);
+    if (row) row.after($('#episode')); else closeEpisode();
+  }
+}
+
+async function openEpisode(id, startIso, row) {
+  const episode = (casebook?.nights || [])
+    .flatMap(night => night.episodes).find(item => item.id === id);
+  if (!episode) return;
+  openEpisodeId = id;
+  document.querySelectorAll('.episode-row').forEach(other =>
+    other.classList.toggle('open', Number(other.dataset.episode) === id));
+
+  const panel = $('#episode');
+  row.after(panel);                     // the clip opens where the eye already is
+  panel.classList.remove('hidden');
+  $('#episode-title').textContent = episodeClock(startIso, episode.start_offset_seconds);
+  const from = atOffsetOf(startIso, episode.start_offset_seconds);
+  const to = atOffsetOf(startIso, episode.start_offset_seconds + episode.duration_seconds);
+  $('#episode-help').textContent =
+    `${episode.duration_seconds.toFixed(0)}-second pause, ${wallTime(from)} – ${wallTime(to)} (${zoneLabel()}), `
+    + `confirmed by ${episode.confirmed_via.join(' and ')}. The clip carries 30 s of audio each side.`;
+  $('#episode-evidence').innerHTML =
+    `<span>duration</span><span>${episode.duration_seconds.toFixed(0)} s</span>` +
+    `<span>detector confidence</span><span>${Math.round(episode.confidence * 100)}%</span>` +
+    Object.entries(episode.evidence)
+      .map(([key, value]) => `<span>${escapeHtml(key.replaceAll('_', ' '))}</span><span>${escapeHtml(value ?? 'n/a')}</span>`).join('');
+
+  const audio = $('#episode-audio');
+  audio.removeAttribute('src');
+  episodeView.data = null;
+  try {
+    const [blob, waveform] = await Promise.all([
+      authedBlob(`/api/events/${id}/audio.wav`),
+      api(`/api/events/${id}/waveform`).catch(error => { casebookNotice(error.message); return null; }),
+    ]);
+    if (openEpisodeId !== id) return;   // moved on while loading
+    audio.src = blob;
+    if (waveform) drawWaveform(episodeView, waveform, true);
+  } catch (error) { if (!(error instanceof AuthError)) casebookNotice(error.message); }
+}
+
+function closeEpisode() {
+  openEpisodeId = null;
+  $('#episode').classList.add('hidden');
+  $('#episode-audio').removeAttribute('src');
+  document.querySelectorAll('.episode-row.open').forEach(row => row.classList.remove('open'));
+}
+
+const episodeView = {canvas: $('#episode-wave'), audio: $('#episode-audio')};
+$('#open-casebook').onclick = () => openCasebook().catch(error => announce(error.message));
+$('#episode-close').onclick = closeEpisode;
+$('#casebook-back').onclick = () => {
+  closeEpisode();
+  $('#casebook').classList.add('hidden');
+  $('#session-list').classList.remove('hidden');
+  loadSessions().catch(error => announce(error.message));
+};
+/* Printing is the low-tech way to hand a doctor something they keep: the print
+   stylesheet drops the chrome and lets every episode row through, plus whichever
+   clip chart is open on screen. */
+$('#casebook-print').onclick = () => window.print();
 
 function drawTimeline(signals, events, desaturations = []) {
   const canvas = $('#timeline');
@@ -700,6 +854,7 @@ const labelView = {canvas: $('#label-wave'), audio: $('#label-audio')};
 const inspectView = {canvas: $('#inspect-wave'), audio: $('#inspect-audio')};
 attachBooster($('#label-audio'), $('#label-gain'), $('#label-gain-val'), $('#label-compress'));
 attachBooster($('#inspect-audio'), $('#inspect-gain'), $('#inspect-gain-val'), $('#inspect-compress'));
+attachBooster($('#episode-audio'), $('#episode-gain'), $('#episode-gain-val'), $('#episode-compress'));
 
 $('#label-next').onclick = () => { batchIndex += 1; renderClip(); };
 $('#label').onclick = () => openLabeling(false);
@@ -707,19 +862,26 @@ $('#label-new').onclick = () => openLabeling(true);
 $('#label-exit').onclick = () => { $('#labeling').classList.add('hidden'); $('#label-audio').removeAttribute('src'); };
 
 $('#tz').textContent = `🕓 ${shortZone()}`;
-$('#tz').onclick = () => {
+$('#casebook-tz').textContent = `🕓 ${shortZone()}`;
+const changeZone = (onScreen, say) => {
   const next = (prompt('Timezone for every clip time (IANA name, e.g. Europe/Madrid, or UTC)', zone) || '').trim();
   if (!next || next === zone) return;
   try {
     new Intl.DateTimeFormat('en-GB', {timeZone: next}); // throws on an unknown zone
     zone = next;
     try { localStorage.setItem(TZ_KEY, zone); } catch {}
-    announce(`Clip times now shown in ${zoneLabel()}.`);
-    if (currentSession) openSession(currentSession.id); else $('#tz').textContent = `🕓 ${shortZone()}`;
-  } catch { announce(`Unknown timezone: ${next}`); }
+    say(`Clip times now shown in ${zoneLabel()}.`);
+    $('#tz').textContent = $('#casebook-tz').textContent = `🕓 ${shortZone()}`;
+    onScreen();
+  } catch { say(`Unknown timezone: ${next}`); }
 };
+$('#tz').onclick = () => changeZone(() => { if (currentSession) openSession(currentSession.id); }, announce);
+$('#casebook-tz').onclick = () => changeZone(renderCasebook, casebookNotice);
 
-window.addEventListener('resize', () => { if (currentSession) openSession(currentSession.id); if (activeView) renderWave(activeView); });
+window.addEventListener('resize', () => {
+  if (currentSession && !$('#review').classList.contains('hidden')) openSession(currentSession.id);
+  if (activeView) renderWave(activeView);
+});
 
 /* ---------- sign-in gate ---------- */
 const authError = (message = '') => { $('#auth-error').textContent = message; };
@@ -727,7 +889,7 @@ const authStep = (id) => ['#auth-login', '#auth-mfa', '#auth-enroll', '#auth-rec
   .forEach(step => $(step).classList.toggle('hidden', step !== `#${id}`));
 
 function showAuthGate() {
-  ['#auth', '#security', '#session-list', '#review']
+  ['#auth', '#security', '#session-list', '#review', '#casebook']
     .forEach(view => $(view).classList.toggle('hidden', view !== '#auth'));
   $('#whoami').classList.add('hidden');
   announce();
@@ -746,7 +908,7 @@ async function startEnroll() {
   } catch (error) { authError(error.message); }
 }
 function enterApp(state) {
-  ['#auth', '#security', '#review'].forEach(view => $(view).classList.add('hidden'));
+  ['#auth', '#security', '#review', '#casebook'].forEach(view => $(view).classList.add('hidden'));
   $('#session-list').classList.remove('hidden');
   $('#whoami-name').textContent = state.username;
   $('#whoami').classList.remove('hidden');
@@ -805,7 +967,7 @@ $('#signout').onclick = async () => { try { await authPost('/api/auth/logout'); 
 const securityNotice = (message = '') => { $('#security-notice').textContent = message; };
 
 async function openSecurity() {
-  ['#session-list', '#review'].forEach(view => $(view).classList.add('hidden'));
+  ['#session-list', '#review', '#casebook'].forEach(view => $(view).classList.add('hidden'));
   $('#security').classList.remove('hidden');
   securityNotice();
   try { await Promise.all([renderTokens(), renderSignins()]); }

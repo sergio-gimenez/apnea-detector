@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from apnea_api.garmin import MAX_SESSION_SPAN, normalize_payload, session_span_seconds
+from apnea_api.garmin import normalize_payload, session_span_seconds
 from apnea_api.models import SleepSession
 
 
@@ -60,11 +60,28 @@ def test_span_of_a_still_recording_session_reaches_now():
     assert session_span_seconds(session, now=now) == 8 * 3600
 
 
-def test_span_is_capped_so_a_stale_session_cannot_ask_for_days():
-    session = _session(status="recording", completed_at=None)
+def test_a_span_longer_than_a_night_loses_to_the_sample_count():
+    # closed four days after the night, the way a slow upload closes it
+    session = _session(
+        total_samples=16_000 * 7 * 3600,
+        completed_at=datetime(2026, 9, 7, 15, 32, tzinfo=timezone.utc),
+    )
+
+    assert session_span_seconds(session) == 7 * 3600
+
+
+def test_a_stale_recording_session_falls_back_to_the_audio_it_has():
+    session = _session(status="recording", total_samples=16_000 * 6 * 3600, completed_at=None)
     now = datetime(2026, 9, 10, 21, 0, tzinfo=timezone.utc)
 
-    assert session_span_seconds(session, now=now) == MAX_SESSION_SPAN.total_seconds()
+    assert session_span_seconds(session, now=now) == 6 * 3600
+
+
+def test_span_is_zero_when_nothing_plausible_is_known():
+    session = _session(status="recording", total_samples=0, completed_at=None)
+    now = datetime(2026, 9, 10, 21, 0, tzinfo=timezone.utc)
+
+    assert session_span_seconds(session, now=now) == 0.0
 
 
 def test_span_falls_back_to_samples_when_the_night_closed_early():

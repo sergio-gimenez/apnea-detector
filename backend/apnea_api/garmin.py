@@ -194,10 +194,17 @@ def session_span_seconds(session: SleepSession, now: datetime | None = None) -> 
     `total_samples` counts only the audio chunks that reached the database, so a
     session still recording -- or one that lost chunks -- reports a fraction of the
     night. Sizing the Garmin window off it clips most of the SpO2 the watch did
-    record. Take the longest span any source supports, capped at MAX_SESSION_SPAN.
+    record. Take the longest span any source supports.
+
+    `completed_at` is when the upload finished, not when the night ended, and a
+    phone that finishes uploading days later would otherwise stretch the window
+    across those days. Any candidate longer than a night is that kind of
+    bookkeeping timestamp rather than a duration, so it is dropped instead of
+    clamped -- clamping would let it win over the honest sample count.
     """
     start = _started_at(session)
-    candidates = [0.0]
+    limit = MAX_SESSION_SPAN.total_seconds()
+    candidates = []
     if session.sample_rate:
         candidates.append(session.total_samples / session.sample_rate)
     if session.completed_at is not None:
@@ -209,7 +216,8 @@ def session_span_seconds(session: SleepSession, now: datetime | None = None) -> 
         # never closed: the night ran at least until now
         reference = now or datetime.now(timezone.utc)
         candidates.append((reference - start).total_seconds())
-    return min(max(candidates), MAX_SESSION_SPAN.total_seconds())
+    plausible = [span for span in candidates if 0 < span <= limit]
+    return max(plausible, default=0.0)
 
 
 def import_for_session(

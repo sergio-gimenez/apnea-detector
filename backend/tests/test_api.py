@@ -495,3 +495,73 @@ def test_confirmed_casebook_is_empty_before_anything_is_reviewed(tmp_path):
     assert book["total_episodes"] == 0 and book["nights"] == []
     assert book["nights_recorded"] == 1
     assert book["median_seconds"] is None and book["largest_spo2_drop"] is None
+
+
+def _start_session(client, session_id: str, started: str) -> None:
+    client.post(
+        "/api/sessions",
+        json={
+            "id": session_id,
+            "device_id": "test phone",
+            "started_at_utc": started,
+            "started_at_monotonic_ns": 123,
+            "sample_rate": 16_000,
+        },
+    )
+    client.post(
+        f"/api/sessions/{session_id}/audio-chunks",
+        data={
+            "sequence": "0",
+            "sample_offset": "0",
+            "sample_count": str(16_000 * 60),
+            "started_at_utc": started,
+            "started_at_monotonic_ns": "123",
+        },
+        files={"file": ("audio_00000.wav", wav_bytes(16_000 * 60), "audio/wav")},
+    )
+
+
+def test_completing_a_session_reports_why_garmin_was_skipped(tmp_path):
+    # no token store on disk: completion still succeeds, and says so
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'gi.db'}"))
+    session_id = str(uuid.uuid4())
+    _start_session(client, session_id, datetime.now(timezone.utc).isoformat())
+
+    body = client.post(f"/api/sessions/{session_id}/complete").json()
+
+    assert body["status"] == "complete"
+    assert "not authenticated" in body["garmin"]["skipped"]
+
+
+def test_a_night_nobody_imported_is_not_a_night_the_watch_missed(tmp_path):
+    client = TestClient(create_app(tmp_path, f"sqlite:///{tmp_path / 'st.db'}"))
+    session_id = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+    _start_session(client, session_id, started.isoformat())
+    client.post(f"/api/sessions/{session_id}/complete")
+
+    assert client.get(f"/api/sessions/{session_id}/summary").json()["spo2_status"] == (
+        "not_imported"
+    )
+
+    # the watch was on the charger: signals arrived, but almost no SpO2 with them
+    client.post(
+        f"/api/sessions/{session_id}/signals",
+        json={
+            "points": [
+                {
+                    "timestamp_utc": (started + timedelta(seconds=i)).isoformat(),
+                    "signal_type": "spo2",
+                    "value": 96,
+                    "unit": "%",
+                    "source": "garmin-connect",
+                    "device": "Garmin",
+                }
+                for i in range(3)
+            ]
+        },
+    )
+
+    assert client.get(f"/api/sessions/{session_id}/summary").json()["spo2_status"] == (
+        "unavailable"
+    )

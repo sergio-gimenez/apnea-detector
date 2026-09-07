@@ -14,6 +14,10 @@ from .models import SignalPoint, SleepArchitecture, SleepSession
 
 UNITS = {"heart_rate": "bpm", "spo2": "%", "respiration_rate": "breaths/min"}
 
+# no night is longer than this; keeps a still-recording session from asking
+# Garmin for a window that spans days
+MAX_SESSION_SPAN = timedelta(hours=16)
+
 
 def _timestamp(value: Any) -> datetime | None:
     if isinstance(value, (int, float)):
@@ -179,6 +183,35 @@ def abs_days(left: str, right: str) -> int:
     return abs((datetime.strptime(left, fmt) - datetime.strptime(right, fmt)).days)
 
 
+def _started_at(session: SleepSession) -> datetime:
+    start = session.started_at_utc
+    return start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
+
+
+def session_span_seconds(session: SleepSession, now: datetime | None = None) -> float:
+    """How long the night actually ran, in seconds.
+
+    `total_samples` counts only the audio chunks that reached the database, so a
+    session still recording -- or one that lost chunks -- reports a fraction of the
+    night. Sizing the Garmin window off it clips most of the SpO2 the watch did
+    record. Take the longest span any source supports, capped at MAX_SESSION_SPAN.
+    """
+    start = _started_at(session)
+    candidates = [0.0]
+    if session.sample_rate:
+        candidates.append(session.total_samples / session.sample_rate)
+    if session.completed_at is not None:
+        completed = session.completed_at
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=timezone.utc)
+        candidates.append((completed - start).total_seconds())
+    if session.status == "recording":
+        # never closed: the night ran at least until now
+        reference = now or datetime.now(timezone.utc)
+        candidates.append((reference - start).total_seconds())
+    return min(max(candidates), MAX_SESSION_SPAN.total_seconds())
+
+
 def import_for_session(
     db: Session,
     session: SleepSession,
@@ -188,11 +221,8 @@ def import_for_session(
     client = Garmin()
     client.login(str(token_store))
 
-    start = session.started_at_utc
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    duration_seconds = session.total_samples / session.sample_rate if session.sample_rate else 0
-    end = start + timedelta(seconds=duration_seconds) + timedelta(hours=3)
+    start = _started_at(session)
+    end = start + timedelta(seconds=session_span_seconds(session)) + timedelta(hours=3)
     if requested_date:
         dates = [requested_date]
     else:

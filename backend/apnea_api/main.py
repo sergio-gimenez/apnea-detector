@@ -397,6 +397,9 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         db.commit()
         return {"status": "uploaded", "sequence": sequence, "sha256": digest}
 
+    def garmin_token_store() -> Path:
+        return Path(os.getenv("GARMIN_TOKEN_STORE", root / "garmin"))
+
     @app.post("/api/sessions/{session_id}/complete")
     def complete_session(session_id: str, db: Session = Depends(get_db)) -> dict:
         session = get_session_or_404(session_id, db)
@@ -404,7 +407,20 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         session.completed_at = utc_now()
         db.commit()
         events = analyze_session(db, session, root)
-        return {"status": "complete", "events": events}
+        # Pull the wearable signals now: a night whose oximetry is fetched days later
+        # is a night whose SpO2 is scored against whatever Garmin still serves. The
+        # import is best-effort -- a phone finishing an upload must not fail because
+        # Garmin is down or the token expired.
+        token_store = garmin_token_store()
+        if not token_store.exists():
+            garmin = {"skipped": "Garmin is not authenticated; run apnea-garmin-login"}
+        else:
+            try:
+                garmin = import_for_session(db, session, token_store)
+            except Exception as exc:
+                db.rollback()
+                garmin = {"failed": str(exc)}
+        return {"status": "complete", "events": events, "garmin": garmin}
 
     @app.post("/api/sessions/{session_id}/analyze")
     def rerun_analysis(
@@ -470,7 +486,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         db: Session = Depends(get_db),
     ) -> dict:
         session = get_session_or_404(session_id, db)
-        token_store = Path(os.getenv("GARMIN_TOKEN_STORE", root / "garmin"))
+        token_store = garmin_token_store()
         if not token_store.exists():
             raise HTTPException(409, "Garmin is not authenticated; run apnea-garmin-login")
         try:
@@ -827,6 +843,26 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         ).all()
         return score_batch([(kind, label) for kind, label in rows])
 
+    # Below an hour of oximetry, ODI and T90 describe a sliver of the night rather
+    # than the night, so they are reported but not treated as usable coverage.
+    SPO2_MIN_COVERAGE_HOURS = 1.0
+
+    def spo2_status(session: SleepSession, db: Session, coverage_hours: float) -> str:
+        """Tell "the watch did not measure" apart from "nobody imported it yet"."""
+        imported = db.scalar(
+            select(func.count())
+            .select_from(SignalPoint)
+            .where(
+                SignalPoint.session_id == session.id,
+                SignalPoint.source == "garmin-connect",
+            )
+        )
+        if not imported:
+            return "not_imported"
+        if coverage_hours < SPO2_MIN_COVERAGE_HOURS:
+            return "unavailable"
+        return "ok"
+
     def build_summary(session: SleepSession, db: Session) -> dict:
         events = list(
             db.scalars(
@@ -885,6 +921,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             "odi4": oximetry["odi4"],
             "t90_seconds": oximetry["t90_seconds"],
             "spo2_coverage_hours": oximetry["coverage_hours"],
+            "spo2_status": spo2_status(session, db, oximetry["coverage_hours"]),
             "oximetry": oximetry,
             "disclaimer": "Screening metric only. SREI is not AHI and this is not a diagnosis.",
         }
@@ -994,6 +1031,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
         "night_utc", "tags", "notes", "status", "hours_analyzed", "srei",
         "suspected_events", "events_over_20s", "events_over_30s", "correlated_events",
         "minimum_spo2", "mean_spo2", "odi3", "odi4", "t90_seconds", "spo2_coverage_hours",
+        "spo2_status",
         "snoring_burden_percent", "snore_bursts", "sleep_score", "sleep_hours",
         "deep_percent", "light_percent", "rem_percent", "awakenings", "restless_moments",
     ]
@@ -1018,6 +1056,7 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             "odi4": s["odi4"],
             "t90_seconds": s["t90_seconds"],
             "spo2_coverage_hours": s["spo2_coverage_hours"],
+            "spo2_status": s["spo2_status"],
             "snoring_burden_percent": s["snoring_burden_percent"],
             "snore_bursts": s["snore_bursts"],
             "sleep_score": arch.get("sleep_score"),

@@ -6,6 +6,11 @@ mandatory authenticator-app second factor, opaque server-side sessions in an
 ``HttpOnly`` cookie, and separately revocable bearer tokens for the phone. No
 roles, no signup.
 
+A browser can also be *remembered*, which stands in for the authenticator on that
+browser alone and never for the password. It is a second opaque cookie backed by
+its own table, so it is listed and revoked separately from the sessions it helps
+create, and it is thrown away whenever the second factor itself changes.
+
 The rate limiter keeps its state in this process. That is sufficient because the
 service runs as a single uvicorn worker (see ``deploy/apnea-detector.service``);
 adding ``--workers`` would need a shared store instead.
@@ -29,11 +34,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from . import totp
-from .models import ApiToken, AuthSession, MfaRecoveryCode, User, utc_now
+from .models import ApiToken, AuthSession, MfaRecoveryCode, TrustedDevice, User, utc_now
 
 SESSION_TTL = timedelta(days=14)
 SESSION_ABSOLUTE_TTL = timedelta(days=30)
 PARTIAL_SESSION_TTL = timedelta(minutes=10)
+DEVICE_TRUST_TTL = timedelta(days=30)
 RECOVERY_CODE_COUNT = 10
 _TOUCH_INTERVAL = timedelta(seconds=60)
 
@@ -234,6 +240,10 @@ def session_cookie_name(secure: bool) -> str:
     return "__Host-nocturne_session" if secure else "nocturne_session"
 
 
+def device_cookie_name(secure: bool) -> str:
+    return "__Host-nocturne_device" if secure else "nocturne_device"
+
+
 def _load_session(db: Session, cookie_value: str) -> AuthSession | None:
     parts = _split_credential(cookie_value)
     if not parts:
@@ -258,6 +268,28 @@ def _load_api_token(db: Session, raw: str) -> ApiToken | None:
     if not hmac.compare_digest(row.token_hash, hash_secret(parts[1])):
         return None
     if row.expires_at is not None and _aware(row.expires_at) <= utc_now():
+        return None
+    return row
+
+
+def load_trusted_device(db: Session, cookie_value: str, user: User) -> TrustedDevice | None:
+    """The remembered-browser row this cookie stands for, if it is still valid.
+
+    Bound to ``user``: the cookie is only ever consulted after a password has been
+    checked, and it may only waive the second factor for the account it was issued
+    to. An expired row is dropped here rather than left to accumulate.
+    """
+    parts = _split_credential(cookie_value)
+    if not parts:
+        return None
+    row = db.get(TrustedDevice, parts[0])
+    if row is None or row.user_id != user.id:
+        return None
+    if not hmac.compare_digest(row.secret_hash, hash_secret(parts[1])):
+        return None
+    if _aware(row.expires_at) <= utc_now():
+        db.delete(row)
+        db.commit()
         return None
     return row
 
@@ -304,6 +336,8 @@ class LoginBody(BaseModel):
 
 class CodeBody(BaseModel):
     code: str = Field(min_length=1, max_length=40)
+    # "remember this browser": waive the code here next time, password still asked
+    remember: bool = False
 
 
 class TokenCreateBody(BaseModel):
@@ -327,6 +361,7 @@ def build_auth_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
     cookie_name = session_cookie_name(secure_cookies)
+    device_cookie = device_cookie_name(secure_cookies)
     # per-IP lockout is tight; the bare-username ceiling only trips under a
     # distributed attack, so it is loose enough that normal fat-fingering misses it.
     login_limiter = RateLimiter(threshold=8)
@@ -367,6 +402,59 @@ def build_auth_router(
             samesite="lax",
             path="/",
         )
+
+    def write_device_cookie(response: Response, value: str) -> None:
+        response.set_cookie(
+            device_cookie,
+            value,
+            max_age=int(DEVICE_TRUST_TTL.total_seconds()),
+            httponly=True,
+            secure=secure_cookies,
+            samesite="lax",
+            path="/",
+        )
+
+    def clear_device_cookie(response: Response) -> None:
+        response.delete_cookie(
+            device_cookie, path="/", httponly=True, secure=secure_cookies, samesite="lax"
+        )
+
+    def presented_device(request: Request, db: Session, user: User) -> TrustedDevice | None:
+        cookie = request.cookies.get(device_cookie)
+        return load_trusted_device(db, cookie, user) if cookie else None
+
+    def remember_browser(
+        db: Session, user: User, request: Request, response: Response
+    ) -> TrustedDevice:
+        """Trust this browser with the second factor for the next 30 days.
+
+        Any trust it already held is replaced rather than added to, so one browser
+        is one row and 'forget this browser' has a single thing to delete.
+        """
+        stale = presented_device(request, db, user)
+        if stale is not None:
+            db.delete(stale)
+        cred_id, secret, value = new_credential()
+        now = utc_now()
+        row = TrustedDevice(
+            id=cred_id,
+            user_id=user.id,
+            secret_hash=hash_secret(secret),
+            created_at=now,
+            expires_at=now + DEVICE_TRUST_TTL,
+            last_used_at=now,
+            user_agent=(request.headers.get("user-agent") or "")[:300] or None,
+            client_ip=client_ip(request),
+        )
+        db.add(row)
+        write_device_cookie(response, value)
+        return row
+
+    def forget_all_devices(db: Session, user: User, response: Response) -> None:
+        """Drop every remembered browser. Called whenever the factor they stand in
+        for changes, because trust in a browser cannot outlive the secret it waives."""
+        db.execute(delete(TrustedDevice).where(TrustedDevice.user_id == user.id))
+        clear_device_cookie(response)
 
     def issue_session(
         db: Session, user: User, request: Request, *, mfa_satisfied: bool
@@ -409,13 +497,14 @@ def build_auth_router(
             raise HTTPException(403, {"detail": "MFA required", "needs_mfa": True})
         return session.user
 
-    def session_state(session: AuthSession) -> dict:
+    def session_state(session: AuthSession, *, remembered: bool = False) -> dict:
         user = session.user
         return {
             "username": user.username,
             "mfa_enabled": user.mfa_enabled,
             "mfa_required": user.mfa_enabled and not session.mfa_satisfied,
             "needs_enrollment": not user.mfa_enabled,
+            "remembered": remembered,
         }
 
     @router.get("/session")
@@ -430,9 +519,12 @@ def build_auth_router(
                     "mfa_enabled": True,
                     "mfa_required": False,
                     "needs_enrollment": False,
+                    "remembered": False,
                 }
             raise HTTPException(401, "Not signed in")
-        return session_state(session)
+        return session_state(
+            session, remembered=presented_device(request, db, session.user) is not None
+        )
 
     @router.post("/login")
     def login(
@@ -450,11 +542,16 @@ def build_auth_router(
         login_limiter.reset(ip_key)
         login_ceiling.reset(name_key)
 
-        satisfied = not user.mfa_enabled
+        # a remembered browser waives the code, never the password: this point is
+        # only reached once the password has already been verified above
+        device = presented_device(request, db, user) if user.mfa_enabled else None
+        if device is not None:
+            device.last_used_at = utc_now()
+        satisfied = not user.mfa_enabled or device is not None
         session, value = issue_session(db, user, request, mfa_satisfied=satisfied)
         db.commit()
         write_cookie(response, value, int(SESSION_TTL.total_seconds()))
-        return session_state(session)
+        return session_state(session, remembered=device is not None)
 
     @router.post("/logout")
     def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
@@ -475,7 +572,9 @@ def build_auth_router(
         session = current_session(request, db)
         user = session.user
         if session.mfa_satisfied:
-            return session_state(session)
+            return session_state(
+                session, remembered=presented_device(request, db, user) is not None
+            )
         if not user.mfa_enabled or not user.totp_secret:
             raise HTTPException(400, "MFA is not set up for this account")
         name_key, ip_key = guard_keys(request, user.username)
@@ -510,9 +609,11 @@ def build_auth_router(
         mfa_ceiling.reset(name_key)
         db.delete(session)
         fresh, value = issue_session(db, user, request, mfa_satisfied=True)
+        if body.remember:
+            remember_browser(db, user, request, response)
         db.commit()
         write_cookie(response, value, int(SESSION_TTL.total_seconds()))
-        return session_state(fresh)
+        return session_state(fresh, remembered=body.remember)
 
     @router.post("/mfa/setup")
     def setup_mfa(request: Request, db: Session = Depends(get_db)) -> dict:
@@ -547,14 +648,18 @@ def build_auth_router(
                 )
             )
         db.delete(session)
+        # trust granted against a previous secret cannot carry over to this one
+        forget_all_devices(db, user, response)
         fresh, value = issue_session(db, user, request, mfa_satisfied=True)
+        if body.remember:
+            remember_browser(db, user, request, response)
         db.commit()
         write_cookie(response, value, int(SESSION_TTL.total_seconds()))
-        return {"recovery_codes": codes, **session_state(fresh)}
+        return {"recovery_codes": codes, **session_state(fresh, remembered=body.remember)}
 
     @router.post("/mfa/disable")
     def disable_mfa(
-        body: DisableMfaBody, request: Request, db: Session = Depends(get_db)
+        body: DisableMfaBody, request: Request, response: Response, db: Session = Depends(get_db)
     ) -> dict:
         session = current_session(request, db)
         user = require_full(session)
@@ -566,6 +671,7 @@ def build_auth_router(
         user.totp_secret = None
         user.pending_totp_secret = None
         db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+        forget_all_devices(db, user, response)
         db.commit()
         return {"ok": True}
 
@@ -635,6 +741,46 @@ def build_auth_router(
             }
             for row in rows
         ]
+
+    @router.get("/devices")
+    def list_devices(request: Request, db: Session = Depends(get_db)) -> list[dict]:
+        session = current_session(request, db)
+        user = require_full(session)
+        here = presented_device(request, db, user)
+        rows = db.scalars(
+            select(TrustedDevice)
+            .where(TrustedDevice.user_id == user.id)
+            .order_by(TrustedDevice.created_at.desc())
+        )
+        return [
+            {
+                "id": row.id,
+                "current": here is not None and row.id == here.id,
+                "created_at": _aware(row.created_at).isoformat(),
+                "expires_at": _aware(row.expires_at).isoformat(),
+                "last_used_at": _aware(row.last_used_at).isoformat() if row.last_used_at else None,
+                "user_agent": row.user_agent,
+                "client_ip": row.client_ip,
+            }
+            for row in rows
+        ]
+
+    @router.delete("/devices/{device_id}")
+    def forget_device(
+        device_id: str, request: Request, response: Response, db: Session = Depends(get_db)
+    ) -> dict:
+        user = require_full(current_session(request, db))
+        row = db.get(TrustedDevice, device_id)
+        if row is None or row.user_id != user.id:
+            raise HTTPException(404, "Device not found")
+        here = presented_device(request, db, user)
+        db.delete(row)
+        db.commit()
+        if here is not None and here.id == device_id:
+            # forgetting the browser you are on: drop its cookie in the same reply
+            # so the next sign-in asks for a code instead of sending a dead id
+            clear_device_cookie(response)
+        return {"ok": True}
 
     @router.delete("/sessions/{session_id}")
     def revoke_session(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict:

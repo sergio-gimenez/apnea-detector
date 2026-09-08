@@ -18,7 +18,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .auth import hash_password, hash_secret, new_credential
-from .models import ApiToken, Base, MfaRecoveryCode, User, utc_now
+from .models import ApiToken, Base, MfaRecoveryCode, TrustedDevice, User, utc_now
 
 MIN_PASSWORD_LENGTH = 10
 
@@ -106,8 +106,13 @@ def _cmd_passwd(db: Session, args: argparse.Namespace) -> None:
         raise SystemExit(f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
     user.password_hash = hash_password(password)
     user.password_changed_at = utc_now()
+    # a password is usually reset because it may be known: a browser that skips
+    # the second factor would hand that knowledge the whole account
+    forgotten = db.execute(
+        delete(TrustedDevice).where(TrustedDevice.user_id == user.id)
+    ).rowcount
     db.commit()
-    print(f"Password updated for {user.username}.")
+    print(f"Password updated for {user.username}. Remembered browsers dropped: {forgotten}.")
 
 
 def _cmd_reset_mfa(db: Session, args: argparse.Namespace) -> None:
@@ -116,6 +121,7 @@ def _cmd_reset_mfa(db: Session, args: argparse.Namespace) -> None:
     user.totp_secret = None
     user.pending_totp_secret = None
     db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    db.execute(delete(TrustedDevice).where(TrustedDevice.user_id == user.id))
     db.commit()
     print(f"MFA cleared for {user.username}. Next sign-in will prompt for re-enrolment.")
 

@@ -1,14 +1,16 @@
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from apnea_api import totp
 from apnea_api.admin import create_user
 from apnea_api.main import create_app
+from apnea_api.models import TrustedDevice
 
 USERNAME = "sergio"
 PASSWORD = "correct horse battery staple"
@@ -43,6 +45,24 @@ def enroll(c):
     return secret, body.json()["recovery_codes"]
 
 
+def open_db(tmp_path):
+    """A second connection to the app's database, for asserting on stored rows."""
+    return sessionmaker(create_engine(f"sqlite:///{tmp_path / 'auth.db'}"))()
+
+
+def sign_in(c, secret, *, remember=False, step=1):
+    """Password plus a code, optionally remembering the browser.
+
+    ``step`` picks a later TOTP step (still inside the server's ±1 window) so a
+    second sign-in in the same test is not refused as a replayed code.
+    """
+    assert login(c).status_code == 200
+    code = totp.now_code(secret, at=time.time() + step * totp.PERIOD)
+    verified = c.post("/api/auth/mfa/verify", json={"code": code, "remember": remember})
+    assert verified.status_code == 200
+    return verified.json()
+
+
 def test_data_routes_require_authentication(app):
     c = client(app)
     assert c.get("/api/health").status_code == 200
@@ -66,6 +86,7 @@ def test_login_without_mfa_is_gated_until_enrolled(app):
         "mfa_enabled": False,
         "mfa_required": False,
         "needs_enrollment": True,
+        "remembered": False,
     }
     gated = c.get("/api/sessions")
     assert gated.status_code == 403 and gated.json()["needs_mfa"] is True
@@ -84,6 +105,7 @@ def test_login_without_mfa_is_gated_until_enrolled(app):
         "mfa_enabled": True,
         "mfa_required": False,
         "needs_enrollment": False,
+        "remembered": False,
     }
 
 
@@ -233,3 +255,102 @@ def test_logout_invalidates_the_session_cookie(app):
     assert c.post("/api/auth/logout").status_code == 200
     assert c.get("/api/auth/session").status_code == 401
     assert c.get("/api/sessions").status_code == 401
+
+
+def test_remembered_browser_skips_the_code_on_the_next_sign_in(app):
+    c = client(app)
+    secret, _ = enroll(c)
+    assert c.post("/api/auth/logout").status_code == 200
+
+    assert sign_in(c, secret, remember=True)["remembered"] is True
+
+    # same browser, fresh sign-in: the password is still asked, the code is not
+    assert c.post("/api/auth/logout").status_code == 200
+    back = login(c).json()
+    assert back["mfa_required"] is False and back["remembered"] is True
+    assert c.get("/api/sessions").status_code == 200
+
+
+def test_a_browser_is_only_remembered_when_asked(app):
+    c = client(app)
+    secret, _ = enroll(c)
+    assert c.post("/api/auth/logout").status_code == 200
+    assert sign_in(c, secret)["remembered"] is False
+
+    assert c.post("/api/auth/logout").status_code == 200
+    assert login(c).json()["mfa_required"] is True
+    assert c.get("/api/sessions").status_code == 403
+
+
+def test_trust_cookie_waives_the_code_but_never_the_password(app):
+    c = client(app)
+    secret, _ = enroll(c)
+    assert c.post("/api/auth/logout").status_code == 200
+    sign_in(c, secret, remember=True)
+    trust = c.cookies.get("__Host-nocturne_device")
+    assert trust
+
+    # a browser holding only the trust cookie is not signed in at all
+    bare = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+    bare.cookies.set("__Host-nocturne_device", trust)
+    assert bare.get("/api/sessions").status_code == 401
+    assert bare.get("/api/auth/session").status_code == 401
+    assert login(bare, "wrong").status_code == 401
+    assert bare.get("/api/sessions").status_code == 401
+
+
+def test_forgetting_the_browser_brings_the_code_back(app):
+    c = client(app)
+    secret, _ = enroll(c)
+    assert c.post("/api/auth/logout").status_code == 200
+    sign_in(c, secret, remember=True)
+
+    devices = c.get("/api/auth/devices").json()
+    assert len(devices) == 1 and devices[0]["current"] is True
+    assert c.delete(f"/api/auth/devices/{devices[0]['id']}").status_code == 200
+    assert c.get("/api/auth/devices").json() == []
+
+    assert c.post("/api/auth/logout").status_code == 200
+    assert login(c).json()["mfa_required"] is True
+
+
+def test_trust_expires_and_the_stale_row_is_dropped(app, tmp_path):
+    c = client(app)
+    secret, _ = enroll(c)
+    assert c.post("/api/auth/logout").status_code == 200
+    sign_in(c, secret, remember=True)
+
+    with open_db(tmp_path) as db:
+        row = db.scalars(select(TrustedDevice)).one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.commit()
+
+    assert c.post("/api/auth/logout").status_code == 200
+    assert login(c).json()["mfa_required"] is True
+    with open_db(tmp_path) as db:
+        assert db.scalars(select(TrustedDevice)).all() == []
+
+
+def test_changing_the_second_factor_forgets_every_browser(app, tmp_path):
+    c = client(app)
+    assert login(c).json()["needs_enrollment"] is True
+    secret = c.post("/api/auth/mfa/setup").json()["secret"]
+    enabled = c.post(
+        "/api/auth/mfa/enable", json={"code": totp.now_code(secret), "remember": True}
+    )
+    assert enabled.status_code == 200 and enabled.json()["remembered"] is True
+    with open_db(tmp_path) as db:
+        assert len(db.scalars(select(TrustedDevice)).all()) == 1
+
+    off = c.post(
+        "/api/auth/mfa/disable",
+        json={
+            "password": PASSWORD,
+            "code": totp.now_code(secret, at=time.time() + totp.PERIOD),
+        },
+    )
+    assert off.status_code == 200
+    with open_db(tmp_path) as db:
+        assert db.scalars(select(TrustedDevice)).all() == []
+    assert c.post("/api/auth/logout").status_code == 200
+    assert login(c).json()["needs_enrollment"] is True

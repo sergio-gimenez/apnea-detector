@@ -35,6 +35,9 @@ do not install a debug APK over an Obtainium release.
 - One operator account: scrypt-hashed password, mandatory authenticator-app (TOTP) MFA,
   opaque `HttpOnly` cookie sessions, and separately revocable per-device API tokens for the
   recorder. All `/api/*` routes except `/api/health` require it.
+- Optional *remember this browser* (30 days): a separate `HttpOnly` cookie that waives the
+  authenticator code on that browser alone — never the password — listed and revoked from the
+  Security panel, and dropped whenever MFA or the password changes.
 - Per-night context: free-text notes plus normalized tags (`van`, `alcohol`, `with partner`,
   `sick`, …), autosaved from the dashboard, so nightly circumstances accumulate alongside the
   metrics.
@@ -64,7 +67,9 @@ docker compose exec api apnea-admin create-user <username>
 
 Dashboard: `http://127.0.0.1:8080`. First load prompts for the password, then walks through
 authenticator-app enrolment (scan the QR, confirm a code, save the recovery codes). After that
-the dashboard opens. Manage device tokens and active sign-ins from the **Security** panel.
+the dashboard opens. Ticking *Remember this browser* at the code prompt skips the code (not the
+password) there for 30 days. Manage device tokens, remembered browsers, and active sign-ins from
+the **Security** panel.
 
 For a throwaway local run with authentication fully disabled, set `APNEA_ALLOW_INSECURE_DEV=1`
 (see `.env.example`).

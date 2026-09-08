@@ -898,6 +898,7 @@ function showLogin() { showAuthGate(); authStep('auth-login'); authError(); }
 function showMfa() {
   showAuthGate(); authStep('auth-mfa'); authError();
   $('#auth-mfa-code').value = ''; $('#auth-mfa-code').focus();
+  $('#auth-remember').checked = false;
 }
 async function startEnroll() {
   showAuthGate(); authStep('auth-enroll'); authError();
@@ -943,7 +944,10 @@ $('#auth-login-go').onclick = async () => {
 $('#auth-mfa-go').onclick = async () => {
   authError('Verifying…');
   try {
-    await authPost('/api/auth/mfa/verify', {code: $('#auth-mfa-code').value.trim()});
+    await authPost('/api/auth/mfa/verify', {
+      code: $('#auth-mfa-code').value.trim(),
+      remember: $('#auth-remember').checked,
+    });
     authError();
     return boot();
   } catch (error) { authError(error.message); }
@@ -970,7 +974,7 @@ async function openSecurity() {
   ['#session-list', '#review', '#casebook'].forEach(view => $(view).classList.add('hidden'));
   $('#security').classList.remove('hidden');
   securityNotice();
-  try { await Promise.all([renderTokens(), renderSignins()]); }
+  try { await Promise.all([renderTokens(), renderDevices(), renderSignins()]); }
   catch (error) { if (!(error instanceof AuthError)) securityNotice(error.message); }
 }
 async function renderTokens() {
@@ -985,6 +989,19 @@ async function renderTokens() {
     await api(`/api/auth/tokens/${button.dataset.revokeToken}`, {method: 'DELETE'});
     securityNotice('Token revoked.');
     renderTokens();
+  });
+}
+async function renderDevices() {
+  const rows = await api('/api/auth/devices');
+  $('#device-rows').innerHTML = rows.length ? rows.map(row => `
+    <div class="sec-row">
+      <div><b>${row.current ? 'This browser' : escapeHtml(row.user_agent || 'Unknown browser')}</b><small>${escapeHtml(row.client_ip || '')} · remembered until ${new Date(row.expires_at).toLocaleDateString()}</small></div>
+      <button data-forget-device="${row.id}" class="ghost">Forget</button>
+    </div>`).join('') : '<p class="muted">No remembered browsers — every sign-in asks for a code.</p>';
+  document.querySelectorAll('[data-forget-device]').forEach(button => button.onclick = async () => {
+    await api(`/api/auth/devices/${button.dataset.forgetDevice}`, {method: 'DELETE'});
+    securityNotice('Browser forgotten. Its next sign-in will ask for a code.');
+    renderDevices();
   });
 }
 async function renderSignins() {

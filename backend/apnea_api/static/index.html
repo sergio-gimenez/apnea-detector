@@ -30,6 +30,8 @@
           <h1>Authenticator code</h1>
           <p class="lede">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
           <label>Code <input id="auth-mfa-code" inputmode="text" autocomplete="one-time-code" maxlength="40"></label>
+          <label class="check"><input type="checkbox" id="auth-remember"> Remember this browser for 30 days</label>
+          <p class="hint">Skips the code on this browser only. Your password is still asked every time, and you can forget the browser from Security.</p>
           <button id="auth-mfa-go">Verify</button>
         </div>
         <div id="auth-enroll" class="auth-step hidden">
@@ -59,6 +61,9 @@
         <p class="hint">Long-lived bearer tokens for the recorder app. Each can be revoked without touching your password.</p>
         <div id="token-list"></div>
         <button id="token-new">Mint a device token</button>
+        <p class="eyebrow" style="margin-top:32px">REMEMBERED BROWSERS</p>
+        <p class="hint">These skip the authenticator code at sign-in. The password is still required on every one of them.</p>
+        <div id="device-rows"></div>
         <p class="eyebrow" style="margin-top:32px">ACTIVE SIGN-INS</p>
         <div id="session-rows"></div>
       </section>

@@ -177,6 +177,9 @@ class User(Base):
     recovery_codes: Mapped[list[MfaRecoveryCode]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    trusted_devices: Mapped[list[TrustedDevice]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class AuthSession(Base):
@@ -231,6 +234,31 @@ class MfaRecoveryCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     user: Mapped[User] = relationship(back_populates="recovery_codes")
+
+
+class TrustedDevice(Base):
+    """A browser the operator asked this account to remember.
+
+    It stands in for the authenticator, never for the password: a remembered
+    browser still signs in with the password, it just is not asked for a code.
+    The cookie carries ``id.secret`` like a session does, so only the hash is
+    stored and a database leak cannot be replayed as a skipped second factor.
+    """
+
+    __tablename__ = "trusted_devices"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    secret_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    # no sliding renewal: trust dies on a fixed date, so "remembered until when?"
+    # has one answer the operator can predict without reading the code
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="trusted_devices")
 
 
 class ReviewItem(Base):

@@ -64,6 +64,11 @@ button.ghost { background:transparent;color:var(--muted); }
 .auth-step input { display:block;width:100%;margin-top:7px;padding:12px 14px;background:#0c1115;border:1px solid var(--line);color:var(--ink);font-size:15px; }
 .auth-step input:focus { outline:none;border-color:var(--cyan); }
 .auth-step > button { width:100%;padding:13px;margin-top:4px; }
+/* the checkbox row opts out of the stacked-field styling above: it reads as a
+   sentence next to its box, not as a field label over an input */
+.auth-step label.check { display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0;font:13px/1.4 Arial,sans-serif;color:var(--ink);margin-bottom:8px;cursor:pointer; }
+.auth-step label.check input { display:inline-block;width:16px;height:16px;margin:0;padding:0;accent-color:var(--cyan);flex:none; }
+.auth-step .hint { margin:0 0 18px; }
 .auth-error:not(:empty) { margin:16px 0 0;padding:10px 14px;border-left:3px solid var(--amber);background:#2a2115;color:#f4d5a2;font-size:13px;white-space:pre-line; }
 .qr { display:inline-block;padding:10px;background:#fff;border-radius:4px;margin-bottom:14px; }
 .qr img { display:block;width:180px;height:180px; }

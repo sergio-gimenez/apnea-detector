@@ -231,6 +231,13 @@ def create_app(data_dir: Path | None = None, database_url: str | None = None) ->
             response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         if path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        else:
+            # The dashboard assets are unversioned filenames, so without this a
+            # browser is free to keep serving the previous deploy's stylesheet for
+            # hours (heuristic freshness off Last-Modified). no-cache still allows
+            # the cache, it just makes it revalidate — the ETag turns an unchanged
+            # asset into a 304.
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     def get_db():

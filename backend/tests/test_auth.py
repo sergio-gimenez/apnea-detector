@@ -354,3 +354,13 @@ def test_changing_the_second_factor_forgets_every_browser(app, tmp_path):
         assert db.scalars(select(TrustedDevice)).all() == []
     assert c.post("/api/auth/logout").status_code == 200
     assert login(c).json()["needs_enrollment"] is True
+
+
+def test_dashboard_assets_revalidate_instead_of_going_stale(app):
+    c = client(app)
+    assert c.get("/api/health").headers["cache-control"] == "no-store"
+    asset = c.get("/styles.css")
+    assert asset.status_code == 200
+    # unversioned filename: the browser must ask before reusing yesterday's deploy
+    assert asset.headers["cache-control"] == "no-cache"
+    assert asset.headers["etag"]

@@ -43,6 +43,18 @@ const clockRange = (start, span) => {
   return `${dayPrefix(from)}${wallTime(from)} – ${wallTime(to)}`;
 };
 const clock = (seconds) => `${dayPrefix(atOffset(seconds))}${wallTime(atOffset(seconds))} (+${duration(seconds)})`;
+
+/* ---------- which night ----------
+   A capture that starts at 00:58 belongs to the night before, not to the day it
+   started on: two recordings "on the 13th" at 00:58 and 23:29 are Saturday's night
+   and Sunday's. So a night is named after the evening it began, counting anything
+   that starts before noon as the tail of the previous evening. Shifting the start
+   back 12 h and reading the calendar day in `zone` does exactly that. */
+const NIGHT_SHIFT_MS = 12 * 3600 * 1000;
+const nightLabel = (startIso) => {
+  const evening = new Date(Date.parse(startIso) - NIGHT_SHIFT_MS);
+  return `Noche del ${evening.toLocaleDateString('es-ES', {weekday: 'short', day: 'numeric', timeZone: zone})}`;
+};
 /* ---------- auth ----------
    The browser authenticates with an HttpOnly session cookie set at /api/auth/login;
    same-origin fetch sends it automatically and attaches an Origin header the server
@@ -81,6 +93,7 @@ async function loadSessions() {
   $('#sessions').innerHTML = sessions.length ? sessions.map(session => `
     <button class="session" data-id="${session.id}">
       <small>${session.status.toUpperCase()} / ${session.id.slice(0,8)}</small>
+      <small class="night">${escapeHtml(nightLabel(session.started_at_utc))}</small>
       <strong>${new Date(session.started_at_utc).toLocaleString()}</strong>
       <small>${duration(session.duration_seconds)} · ${escapeHtml(session.device_id)}</small>
       ${session.tags && session.tags.length
@@ -110,7 +123,7 @@ async function openSession(id) {
   const [summary, signals] = await Promise.all([api(`/api/sessions/${id}/summary`), api(`/api/sessions/${id}/signals`)]);
   $('#session-list').classList.add('hidden');
   $('#review').classList.remove('hidden');
-  $('#session-date').textContent = `${new Date(currentSession.started_at_utc).toLocaleString('en-GB', {timeZone: zone})} · ${zoneLabel()} · ${currentSession.id.slice(0,8)}`;
+  $('#session-date').textContent = `${nightLabel(currentSession.started_at_utc)} · ${new Date(currentSession.started_at_utc).toLocaleString('en-GB', {timeZone: zone})} · ${zoneLabel()} · ${currentSession.id.slice(0,8)}`;
   $('#tz').textContent = `🕓 ${shortZone()}`;
   const oximetry = summary.oximetry || {};
   const arch = summary.sleep_architecture;
@@ -393,7 +406,7 @@ function renderCasebook() {
     <section class="panel night-group">
       <div class="night-head">
         <div>
-          <p class="eyebrow">${escapeHtml(wallDay(started).toUpperCase())} · ${escapeHtml(started.toLocaleDateString('en-GB', {year: 'numeric', month: 'long', day: 'numeric', timeZone: zone}))}</p>
+          <p class="eyebrow">${escapeHtml(nightLabel(session.started_at_utc).toUpperCase())} · ${escapeHtml(wallDay(started).toUpperCase())} · ${escapeHtml(started.toLocaleDateString('en-GB', {year: 'numeric', month: 'long', day: 'numeric', timeZone: zone}))}</p>
           <h2>${night.episodes.length} confirmed episode${night.episodes.length === 1 ? '' : 's'}</h2>
         </div>
         <button class="ghost" data-open-night="${session.id}">Open this night ▸</button>

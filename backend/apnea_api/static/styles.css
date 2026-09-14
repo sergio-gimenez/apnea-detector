@@ -12,6 +12,7 @@ h1 { font-size:clamp(40px,6vw,86px); line-height:.92; letter-spacing:-.06em; mar
 .lede { max-width:620px; color:var(--muted); font-size:17px; margin:28px 0 48px; }
 .sessions { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
 .session { text-align:left; color:inherit; background:#0c1115; border:1px solid var(--line); padding:20px; cursor:pointer; transition:.2s; }.session:hover { transform:translateY(-3px); border-color:var(--cyan); }.session strong { display:block;font-size:18px;margin:8px 0; }.session small { color:var(--muted);font-family:'DM Mono',monospace; }
+.session .night { display:block;margin-top:8px;color:var(--cyan); }
 .hidden { display:none!important; }.text-button { background:none;border:0;color:var(--muted);padding:0;margin-bottom:28px;cursor:pointer; }
 .review-head { display:flex;justify-content:space-between;align-items:end;margin-bottom:28px; }.review-head h1 { font-size:56px; }.actions { display:flex;gap:8px; }
 button { font:600 13px Arial,sans-serif; border:1px solid #3b4a54; background:#172128; color:var(--ink); padding:11px 16px; cursor:pointer; }button:hover { border-color:var(--cyan); }
